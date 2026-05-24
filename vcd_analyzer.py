@@ -20,7 +20,7 @@ Global options:
 Argument formats:
   <file>          VCD file path
   --filter K1,K2  Comma-separated patterns. Plain text uses case-insensitive substring match;
-                  patterns containing *, ?, or [ use case-insensitive glob match.
+                  patterns containing * or ? use case-insensitive glob match.
                   e.g. --filter clk,rst   --filter '*_valid,*_ready,*_data'   --filter 'top.u_dma.*'
   --begin T       Start time with optional unit suffix: 0, 100ns, 17.5us, 1ms, 500ps, 200fs
   --end T         End time, same format as --begin. Omit for no upper bound
@@ -43,7 +43,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.2.4'
+__version__ = '1.2.5'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -58,6 +58,31 @@ from collections import defaultdict
 # -- Time utilities ----------------------------------------------------------
 
 _UNITS = {'fs': 1e-15, 'ps': 1e-12, 'ns': 1e-9, 'us': 1e-6, 'ms': 1e-3, 's': 1.0}
+
+
+# Resource limits — generous defaults that never trip on real engineering
+# files but reject pathological/malicious inputs cleanly.
+# Override per-process via environment variables, e.g.:
+#   VCD_ANALYZER_MAX_VARS=2000000 vcd_analyzer info big.vcd
+def _env_int(name, default):
+    """Read a positive integer resource limit from the environment."""
+    raw = os.environ.get(name)
+    if raw is None or raw == '':
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+MAX_VARS = _env_int('VCD_ANALYZER_MAX_VARS', 500_000)
+MAX_REASSEMBLE_BITS = _env_int('VCD_ANALYZER_MAX_REASSEMBLE_BITS', 65536)
+MAX_TIME_ARG_LEN = 100         # CLI/programmatic time string length cap
+MAX_TIME_TICKS = (1 << 63) - 1  # int64 max — keeps downstream arithmetic safe
+MAX_FILTER_PATTERN_LEN = 256
+MAX_FILTER_WILDCARDS = 16
+
 
 # IEEE 1364-2005 18.2.2 real value_change is 'r' + real_number where
 # real_number follows C99 printf("%g") shape: optional sign, integer and/or
@@ -110,6 +135,25 @@ class _TimeParseError(ValueError):
     """Raised by parse_time on invalid input; caught in main() for friendly CLI errors."""
 
 
+class _FilterParseError(argparse.ArgumentTypeError):
+    """Raised when --filter contains an unsafe or unsupported pattern.
+    argparse handles this automatically with a friendly message."""
+
+
+class _VCDResourceError(RuntimeError):
+    """Raised when a VCD input exceeds configured resource limits.
+    Surfaced in main() as a CLI error, no Python traceback."""
+
+
+def _check_time_range(ticks, original):
+    if ticks < 0:
+        raise _TimeParseError('time must be non-negative; got {!r}'.format(original))
+    if ticks > MAX_TIME_TICKS:
+        raise _TimeParseError(
+            'time value too large; got {!r}, max ticks is {}'.format(original, MAX_TIME_TICKS))
+    return ticks
+
+
 def parse_time(s, ts_sec):
     """Parse time string with optional unit suffix to internal VCD timestamp.
 
@@ -122,18 +166,22 @@ def parse_time(s, ts_sec):
     and unit is NOT allowed ('5 ns' is rejected; standard unit literals
     are written as a single token).
 
-    Raises _TimeParseError on any invalid input; never raises ZeroDivisionError
-    or returns unbounded values for hostile inputs.
+    Hardened against:
+    - ZeroDivisionError when ts_sec <= 0 (e.g. malformed $timescale)
+    - Overflow / non-finite intermediate values
+    - Overlong input strings (CPU DoS)
+    - Tick counts exceeding int64
     """
     if s is None:
         return None
-    # Length cap defends against pathological inputs causing slow regex.
-    if not isinstance(s, str) or len(s) > 64:
+    if not isinstance(s, str):
         raise _TimeParseError(
-            'time value too long or wrong type; expected up to 64 chars')
+            'time value must be a string; got {}'.format(type(s).__name__))
+    if len(s) > MAX_TIME_ARG_LEN:
+        raise _TimeParseError(
+            'time value too long; max length is {}'.format(MAX_TIME_ARG_LEN))
     stripped = s.strip()
-    # Reject whitespace between digits and unit. Matching is anchored on the
-    # stripped form with no \s* between value and unit.
+    # Anchored match — no \s* between value and unit ('5 ns' must be rejected).
     m = re.match(r'^([+-]?)(\d+\.\d*|\.\d+|\d+)(fs|ps|ns|us|ms|s)?$', stripped)
     if not m:
         # Fall back to bare integer ('100', '-5'); reject anything else.
@@ -143,10 +191,7 @@ def parse_time(s, ts_sec):
             raise _TimeParseError(
                 'invalid time value {!r}; expected integer ticks or value '
                 'with fs/ps/ns/us/ms/s suffix'.format(s))
-        if v < 0:
-            raise _TimeParseError(
-                'time must be non-negative; got {!r}'.format(s))
-        return v
+        return _check_time_range(v, s)
     sign, val_str, unit = m.group(1), m.group(2), m.group(3)
     if sign == '-' and val_str.strip('0.') != '':
         # Reject negative non-zero. '-0' / '-0.0' silently treated as 0.
@@ -157,11 +202,17 @@ def parse_time(s, ts_sec):
             raise _TimeParseError(
                 'bare numeric time must be integer ticks; got {!r}. '
                 'Use a unit suffix for fractional times, e.g. {}ns'.format(s, val_str))
-        return int(val_str)
+        return _check_time_range(int(val_str), s)
     if ts_sec <= 0:
         raise _TimeParseError(
             'cannot convert time with unit because VCD $timescale is 0 or invalid')
-    return int(round(float(val_str) * _UNITS[unit] / ts_sec))
+    try:
+        scaled = float(val_str) * _UNITS[unit] / ts_sec
+    except (OverflowError, ValueError, ZeroDivisionError):
+        raise _TimeParseError('invalid time value {!r}'.format(s))
+    if not math.isfinite(scaled):
+        raise _TimeParseError('time value {!r} is not finite'.format(s))
+    return _check_time_range(int(round(scaled)), s)
 
 
 def fmt_time(ts, ts_sec):
@@ -238,6 +289,40 @@ def val_to_int(value):
         return int(value, 2) if len(value) > 1 else int(value)
     except ValueError:
         return None
+
+
+def _normalize_filter_patterns(value):
+    """Normalize and bound user-supplied substring/glob patterns.
+
+    Plain text remains substring matching. Only '*' and '?' trigger glob
+    matching; '[' is literal because VCD bus ranges like data[7:0] are
+    common signal names. Pattern length and wildcard count are bounded
+    to keep Python 3.9's fnmatch/regex translation from becoming a CPU
+    DoS surface ('a*a*a*...b' style inputs can be slow in older Python).
+    Consecutive '*' are collapsed (matches glob semantics, reduces backtracking).
+
+    Used by:
+    - argparse type= on --filter (raises argparse-friendly error)
+    - VCDParser.match() applied to internally-stored keyword lists
+    """
+    if value is None:
+        return None
+    raw_patterns = value.split(',') if isinstance(value, str) else value
+    out = []
+    for raw in raw_patterns:
+        pat = str(raw).strip()
+        if not pat:
+            continue
+        if len(pat) > MAX_FILTER_PATTERN_LEN:
+            raise _FilterParseError(
+                'filter pattern too long; max length is {}'.format(MAX_FILTER_PATTERN_LEN))
+        pat = re.sub(r'\*+', '*', pat)  # collapse `**` → `*`
+        if pat.count('*') + pat.count('?') > MAX_FILTER_WILDCARDS:
+            raise _FilterParseError(
+                'too many wildcard characters in filter pattern; max is {}'.format(
+                    MAX_FILTER_WILDCARDS))
+        out.append(pat)
+    return out
 
 
 # -- VCD Parser with bit-exploded signal reassembly -------------------------
@@ -367,6 +452,14 @@ class VCDParser:
                             if bit_str is not None and w > 1:
                                 name = name + bit_str
                                 bit_str = None
+                            # Resource cap: refuse to allocate unbounded memory
+                            # for malicious VCDs declaring millions of $var.
+                            # Default 500k is ~25x larger than typical QuestaSim
+                            # files; tune via VCD_ANALYZER_MAX_VARS env var.
+                            if len(raw_vars) >= MAX_VARS:
+                                raise _VCDResourceError(
+                                    'too many $var declarations: more than {}. '
+                                    'Set VCD_ANALYZER_MAX_VARS to raise the limit.'.format(MAX_VARS))
                             raw_vars.append((sym, name, w, bit_str, '.'.join(scope), vtype))
                         elif current_kw == '$enddefinitions':
                             done = True
@@ -393,7 +486,17 @@ class VCDParser:
                 m = re.match(r'\[(\d+)\]', bit_str)
                 if m:
                     idx = int(m.group(1))
-                    bit_groups[(sc, name)][idx] = sym
+                    group = bit_groups[(sc, name)]
+                    group[idx] = sym
+                    # Resource cap: refuse to allocate gigantic synthesized
+                    # buses (per-call template copy cost scales linearly).
+                    # Default 65536 is 128× typical QuestaSim bit-bus size;
+                    # tune via VCD_ANALYZER_MAX_REASSEMBLE_BITS env var.
+                    if len(group) > MAX_REASSEMBLE_BITS:
+                        raise _VCDResourceError(
+                            'bit-exploded group {}.{} has more than {} bits. '
+                            'Set VCD_ANALYZER_MAX_REASSEMBLE_BITS to raise the limit.'.format(
+                                sc or '<root>', name, MAX_REASSEMBLE_BITS))
                     bit_types[(sc, name)] = vtype
                     bit_select_singletons.append((sym, name, idx, sc, vtype))
                     continue
@@ -466,10 +569,16 @@ class VCDParser:
         containing shell glob metacharacters (*, ?) use fnmatch-style
         matching, also case-insensitive. '[' is treated literally because
         VCD bus ranges like data[7:0] are common signal names.
+
+        Input is normalized through _normalize_filter_patterns to bound
+        pattern length and wildcard count, defending against fnmatch
+        translation pathologies in Python 3.9.
         """
         if not keywords:
             return None
-        pats = [k.lower() for k in keywords if k]
+        pats = [k.lower() for k in _normalize_filter_patterns(keywords) or []]
+        if not pats:
+            return None
         out = set()
         for sid, info in self.signals.items():
             for path in info['aliases']:
@@ -1346,7 +1455,7 @@ def _add_time_args(sp):
 
 def _add_filter(sp):
     sp.add_argument('--filter', metavar='K1,K2,...',
-                    type=lambda s: [k.strip() for k in s.split(',') if k.strip()],
+                    type=_normalize_filter_patterns,
                     help='comma-separated substring/glob patterns, case-insensitive')
 
 
@@ -1420,6 +1529,12 @@ def main():
     except PermissionError as e:
         sys.exit('Error: permission denied: {}'.format(e.filename or args.file))
     except _TimeParseError as e:
+        sys.exit('Error: ' + str(e))
+    except _VCDResourceError as e:
+        sys.exit('Error: ' + str(e))
+    except _FilterParseError as e:
+        # Reaches here only if raised from VCDParser.match() at runtime;
+        # argparse handles the same error when raised from type=.
         sys.exit('Error: ' + str(e))
 
 

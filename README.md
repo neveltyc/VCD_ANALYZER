@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.2.4`
+        Version `1.2.5`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Keep the earlier 1.2.4 snapshot because it stays closest to both 1.2.3 and 1.2.5.
-- Tighten time parsing, overflow handling, and general CLI validation.
-- Preserve the legacy search interface and sanitized regression assets.
+        - Introduce environment-backed resource limits and filter normalization.
+- Start treating hostile or pathological inputs more defensively.
+- Keep the test library focused on sanitized smoke coverage, not raw customer traces.
 
         ## Commands
 
@@ -48,7 +48,7 @@ Global options:
 Argument formats:
   <file>          VCD file path
   --filter K1,K2  Comma-separated patterns. Plain text uses case-insensitive substring match;
-                  patterns containing *, ?, or [ use case-insensitive glob match.
+                  patterns containing * or ? use case-insensitive glob match.
                   e.g. --filter clk,rst   --filter '*_valid,*_ready,*_data'   --filter 'top.u_dma.*'
   --begin T       Start time with optional unit suffix: 0, 100ns, 17.5us, 1ms, 500ps, 200fs
   --end T         End time, same format as --begin. Omit for no upper bound

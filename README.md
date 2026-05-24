@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.2.2`
+        Version `1.2.3`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Add richer begin/end time metadata helpers for JSON-oriented outputs.
-- Keep the legacy search and summary workflow intact.
-- Refresh the historical test fixture set with the restored archive snapshot.
+        - Tune result payload details while keeping the 1.2 command surface stable.
+- Continue cleaning up JSON structures around interval-based search.
+- Retain the same unittest coverage points for backwards compatibility.
 
         ## Commands
 

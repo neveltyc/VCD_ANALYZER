@@ -43,7 +43,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.2.2'
+__version__ = '1.2.3'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -482,7 +482,25 @@ class VCDParser:
         # the same VCDParser multiple times and in non-monotonic order.
         # Object-level mutable state would leak future bit values into
         # earlier snapshots for bit-exploded buses.
-        bit_state = {gid: bits[:] for gid, bits in self._bit_state_template.items()}
+        #
+        # Laziness: when the caller selected a subset of signals (sids),
+        # maintain only the synthesized bit-buses that can be emitted for
+        # this query. This avoids touching large unrelated bit-exploded
+        # buses during catch-up scans, while preserving exact behavior for
+        # selected buses and for no-filter calls.
+        if sids is None:
+            bit_map = self._bit_map
+            bit_state = {gid: bits[:] for gid, bits in self._bit_state_template.items()}
+        else:
+            bit_map = {}
+            needed_gids = set()
+            for sym0, refs in self._bit_map.items():
+                kept = [(gid, idx) for gid, idx in refs if gid in sids]
+                if kept:
+                    bit_map[sym0] = kept
+                    for gid, _idx in kept:
+                        needed_gids.add(gid)
+            bit_state = {gid: self._bit_state_template[gid][:] for gid in needed_gids}
 
         def _next():
             return pushback.pop() if pushback else next(raw, None)
@@ -592,19 +610,17 @@ class VCDParser:
 
             # Catch-up before t0: update bit_state only, don't emit
             if cur_t < t0:
-                if sym in self._bit_map:
-                    for gid, idx in self._bit_map[sym]:
+                if sym in bit_map:
+                    for gid, idx in bit_map[sym]:
                         bit_state[gid][idx] = val
                 continue
 
             # Bit-exploded signal: aggregate into virtual bus value(s).
             # If the same identifier_code drives multiple synthesized buses
             # (via aliased parent declarations), each gets its own event.
-            if sym in self._bit_map:
-                for gid, idx in self._bit_map[sym]:
+            if sym in bit_map:
+                for gid, idx in bit_map[sym]:
                     bit_state[gid][idx] = val
-                    if sids is not None and gid not in sids:
-                        continue
                     pending[gid] = ''.join(reversed(bit_state[gid]))
                 continue
 

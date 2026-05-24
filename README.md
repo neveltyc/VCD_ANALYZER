@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.2.7`
+        Version `1.2.8`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Polish parser bounds and filtering safety checks.
-- Keep the external command surface stable for legacy users.
-- Carry forward the same sanitized VCD stimuli and unittest structure.
+        - Add dedicated VCD timestamp token validation.
+- Reduce the risk of malformed timestamps corrupting downstream analysis.
+- Keep the legacy search tests intact against sanitized fixtures.
 
         ## Commands
 

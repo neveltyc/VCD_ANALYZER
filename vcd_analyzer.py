@@ -43,7 +43,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.2.7'
+__version__ = '1.2.8'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -118,14 +118,20 @@ def _parse_timescale(text):
     """Extract base time unit in seconds from $timescale line.
 
     IEEE 1364-2005 18.2.3.8 only allows 1, 10, or 100 as the number, but
-    we accept any positive integer for lenience. A zero or missing number
-    falls back to 1e-12 (1 ps) — the standard's default — to avoid
-    downstream division-by-zero in parse_time.
+    we accept any positive integer for lenience. A zero, missing, or
+    pathologically long number falls back to 1e-12 (1 ps) — the standard's
+    default — to avoid downstream division-by-zero in parse_time and CPU
+    DoS from int() on huge digit strings (Python 3.9 is O(n^2)).
     """
     m = re.search(r'(\d+)\s*(fs|ps|ns|us|ms|s)', text)
     if not m:
         return 1e-12
-    n = int(m.group(1))
+    digits = m.group(1)
+    # Length cap matches parse_time's MAX_TIME_ARG_LEN. The standard allows
+    # only 1/10/100 (≤3 digits), so anything multi-line absurd is corruption.
+    if len(digits) > MAX_TIME_ARG_LEN:
+        return 1e-12
+    n = int(digits)
     if n <= 0:
         return 1e-12
     return n * _UNITS[m.group(2)]
@@ -152,6 +158,34 @@ def _check_time_range(ticks, original):
         raise _TimeParseError(
             'time value too large; got {!r}, max ticks is {}'.format(original, MAX_TIME_TICKS))
     return ticks
+
+
+def _parse_vcd_timestamp_token(tok):
+    """Parse a VCD '#<digits>' simulation_time token into an int.
+
+    Returns int on success, None for malformed input (e.g. '#1.5' — digit
+    prefix passed the isdigit() pre-check but int() rejects it). The
+    None-path preserves the round-7 "tolerant reader" behavior: malformed
+    timestamps are silently skipped, the rest of the stream continues.
+
+    Raises _VCDResourceError for inputs that would cause CPU/memory DoS or
+    exceed int64. Python 3.11+ has PEP 678 (int_max_str_digits) baked in,
+    but we target 3.9 where int(s) is O(n^2) for huge n; even on 3.11+
+    the PEP 678 ValueError would otherwise become an unhandled traceback.
+    """
+    digits = tok[1:]
+    if len(digits) > MAX_TIME_ARG_LEN:
+        raise _VCDResourceError(
+            'VCD timestamp token too long: {} digits (max {}); '
+            'file may be corrupt or malicious'.format(len(digits), MAX_TIME_ARG_LEN))
+    try:
+        v = int(digits)
+    except ValueError:
+        return None  # tolerated malformed (e.g. '#1.5')
+    if v > MAX_TIME_TICKS:
+        raise _VCDResourceError(
+            'VCD timestamp too large: got {}, max ticks is {}'.format(v, MAX_TIME_TICKS))
+    return v
 
 
 def parse_time(s, ts_sec):
@@ -527,10 +561,21 @@ class VCDParser:
         # '[0]' declaration alone is NOT a bus — it's a partial dump that
         # happens to use bit 0; synthesizing it as 'data[0:0]' would lie
         # about the file structure.
+        #
+        # DoS guard: do NOT compute set(range(max+1)) — a malicious VCD with
+        # 'bus[0]' + 'bus[1000000000]' would force materialization of a
+        # billion-element set (gigabytes of RAM). Indices [0..max] form a
+        # contiguous run iff: count == max+1 AND 0 is present. Both checks
+        # are O(1) on dict_keys.
         non_contiguous = set()
         for key, bits in bit_groups.items():
-            indices = set(bits.keys())
-            if len(indices) < 2 or indices != set(range(max(indices) + 1)):
+            indices = bits.keys()
+            n = len(indices)
+            if n < 2:
+                non_contiguous.add(key)
+                continue
+            max_idx = max(indices)
+            if max_idx + 1 != n or 0 not in indices:
                 non_contiguous.add(key)
 
         # Each non-contiguous bit-select becomes a standalone 'name[idx]' signal
@@ -722,7 +767,10 @@ class VCDParser:
                 continue
 
             if tok.startswith('#') and len(tok) > 1 and tok[1].isdigit():
-                new_t = int(tok[1:])
+                new_t = _parse_vcd_timestamp_token(tok)
+                if new_t is None:
+                    # Malformed (e.g. '#1.5'); silently skip per round-7 policy.
+                    continue
                 if cur_t >= t0:
                     for sid, val in _flush():
                         yield cur_t, sid, val
@@ -865,9 +913,8 @@ class VCDParser:
                         break
                 continue
             if tok.startswith('#') and len(tok) > 1 and tok[1].isdigit():
-                try:
-                    t = int(tok[1:])
-                except ValueError:
+                t = _parse_vcd_timestamp_token(tok)
+                if t is None:
                     continue
                 if t_min is None:
                     t_min = 0 if saw_initial_data else t

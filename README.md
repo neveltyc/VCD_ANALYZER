@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.0.0`
+        Version `1.1.0`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Ship the core waveform inspection CLI with info, list, dump, summary, snapshot, compare, and value-based search.
-- Include dedicated edges and AXI-stream handshake helpers for quick clock and transfer analysis.
-- Seed the repository with a sanitized fixture set and a lightweight unittest smoke suite.
+        - Remove the specialized handshake command from the CLI surface.
+- Rework data-section token handling around a dedicated token generator.
+- Keep the legacy value-search workflow and edge analysis in place.
 
         ## Commands
 
@@ -21,7 +21,6 @@
 - `dump`
 - `summary`
 - `edges`
-- `handshake`
 - `snapshot`
 - `compare`
 - `search`
@@ -39,7 +38,6 @@ Commands:
   dump       <file> [--begin T] [--end T] [--filter K1,K2]   Print signal value changes in time order
   summary    <file> [--begin T] [--end T] [--filter K1,K2]   Per-signal stats: change count, unique values, static detection
   edges      <file> [--begin T] [--end T] [--filter K1,K2]   1-bit edge detection with frequency estimation
-  handshake  <file> [--begin T] [--end T] [--filter K1,K2]   AXI-Stream valid&ready transfer analysis
   snapshot   <file> --at T [--filter K1,K2]        All signal values at a given time point
   compare    <file> --at T1,T2 [--filter K1,K2]    Diff signal values between two time points
   search     <file> --value V [--signal K] [--begin T] [--end T] [--filter K1,K2]   Find when signal equals a value
@@ -63,7 +61,6 @@ Examples:
   vcd_analyzer dump sim.vcd --begin 17.5us --end 17.6us --filter clk,rst,state
   vcd_analyzer summary sim.vcd --filter dll_st,locked
   vcd_analyzer edges sim.vcd --filter clk_500M
-  vcd_analyzer handshake sim.vcd --filter us_s --begin 17.5us
   vcd_analyzer snapshot sim.vcd --at 17.55us --filter init_done,state
   vcd_analyzer compare sim.vcd --at 17.535us,17.56us --filter init_done,link_active,state
   vcd_analyzer search sim.vcd --signal state --value 5

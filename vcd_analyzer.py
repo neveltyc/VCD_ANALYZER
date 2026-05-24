@@ -9,7 +9,6 @@ Commands:
   dump       <file> [--begin T] [--end T] [--filter K1,K2]   Print signal value changes in time order
   summary    <file> [--begin T] [--end T] [--filter K1,K2]   Per-signal stats: change count, unique values, static detection
   edges      <file> [--begin T] [--end T] [--filter K1,K2]   1-bit edge detection with frequency estimation
-  handshake  <file> [--begin T] [--end T] [--filter K1,K2]   AXI-Stream valid&ready transfer analysis
   snapshot   <file> --at T [--filter K1,K2]        All signal values at a given time point
   compare    <file> --at T1,T2 [--filter K1,K2]    Diff signal values between two time points
   search     <file> --value V [--signal K] [--begin T] [--end T] [--filter K1,K2]   Find when signal equals a value
@@ -33,7 +32,6 @@ Examples:
   vcd_analyzer dump sim.vcd --begin 17.5us --end 17.6us --filter clk,rst,state
   vcd_analyzer summary sim.vcd --filter dll_st,locked
   vcd_analyzer edges sim.vcd --filter clk_500M
-  vcd_analyzer handshake sim.vcd --filter us_s --begin 17.5us
   vcd_analyzer snapshot sim.vcd --at 17.55us --filter init_done,state
   vcd_analyzer compare sim.vcd --at 17.535us,17.56us --filter init_done,link_active,state
   vcd_analyzer search sim.vcd --signal state --value 5
@@ -41,7 +39,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -143,68 +141,97 @@ def val_to_int(value):
 
 # -- VCD Parser with bit-exploded signal reassembly -------------------------
 
+# IEEE 1364-2005 declaration keywords that introduce a $<kw> ... $end section.
+_DECL_KEYWORDS = {'$timescale', '$scope', '$upscope', '$var',
+                  '$comment', '$date', '$version', '$enddefinitions'}
+
+# IEEE 1364-2005 18.2.3 simulation keywords that wrap value_changes until $end.
+# These don't change the meaning of the wrapped value_changes; they're just
+# block markers. We skip the keyword and $end, and parse the body as normal
+# value changes (whether on the same line or following lines).
+_SIM_KEYWORDS = {'$dumpall', '$dumpoff', '$dumpon', '$dumpvars'}
+
+
 class VCDParser:
-    """Streaming VCD parser. Auto-reassembles QuestaSim bit-exploded signals."""
+    """Streaming VCD parser. Token-based: handles single-line and multi-line
+    sections, inline simulation keyword blocks, and multi-line port values
+    per IEEE 1364-2005 Section 18.
+
+    Auto-reassembles bit-exploded signals (QuestaSim writes 512-bit signals
+    as 512 individual 1-bit $var entries with [N] suffix).
+    """
 
     def __init__(self, path):
         self.path = path
         self.ts_str = ''
         self.ts_sec = 1e-12        # timescale in seconds
-        self.signals = {}           # sig_id -> {path, width}
+        self.signals = {}           # sig_id -> {path, width, type, aliases}
         self._data_offset = 0
-        # Bit reassembly: sym -> (sig_id, bit_index)
-        self._bit_map = {}
-        # sig_id -> [None]*width for bit-exploded signals
-        self._bit_state = {}
+        # If $enddefinitions $end is followed by data tokens on the same
+        # line(s) buffered by readline, those tokens replay first in data.
+        self._initial_tokens = []
+        self._bit_map = {}          # sym -> (sig_id, bit_index)
+        self._bit_state = {}        # sig_id -> [bit_val] * width
         self._parse_header()
 
     def _parse_header(self):
+        """Token-based header parse. Sections may span multiple lines;
+        $end is the only terminator (IEEE 1364-2005 18.2.1)."""
         scope = []
-        raw_vars = []  # (symbol, name, width, bit_idx_str, scope_path)
+        raw_vars = []  # (sym, name, width, bit_idx_str, scope_path, vtype)
+        current_kw = None
+        body = []
+        done = False
+
         with open(self.path, 'r', errors='replace') as f:
-            while True:
+            while not done:
                 line = f.readline()
                 if not line:
                     break
-                s = line.strip()
-                if s.startswith('$timescale'):
-                    buf = s
-                    while '$end' not in buf:
-                        buf += ' ' + f.readline().strip()
-                    self.ts_str = buf
-                    self.ts_sec = _parse_timescale(buf)
-                elif s.startswith('$scope'):
-                    p = s.split()
-                    if len(p) >= 3:
-                        scope.append(p[2])
-                elif s.startswith('$upscope'):
-                    if scope:
-                        scope.pop()
-                elif s.startswith('$var'):
-                    p = s.split()
-                    if len(p) >= 5:
-                        vtype = p[1]
-                        # Width is normally an integer, but extended VCD ports
-                        # can use [msb:lsb] form per IEEE 1364-2005 18.4.2.
-                        try:
-                            w = int(p[2])
-                        except ValueError:
-                            m = re.match(r'\[(\d+):(\d+)\]', p[2])
-                            if not m:
-                                continue
-                            w = abs(int(m.group(1)) - int(m.group(2))) + 1
-                        sym, name = p[3], p[4]
-                        bit_str = p[5] if len(p) >= 7 and p[5].startswith('[') else None
-                        raw_vars.append((sym, name, w, bit_str, '.'.join(scope), vtype))
-                elif s.startswith('$enddefinitions'):
-                    while '$end' not in s:
-                        s = f.readline().strip()
-                    self._data_offset = f.tell()
-                    break
+                for tok in line.split():
+                    if done:
+                        self._initial_tokens.append(tok)
+                        continue
+                    if current_kw is None:
+                        if tok in _DECL_KEYWORDS:
+                            current_kw = tok
+                            body = []
+                        # else: stray token, ignore
+                    elif tok == '$end':
+                        # Section complete
+                        if current_kw == '$timescale':
+                            ts_body = ' '.join(body)
+                            self.ts_str = '$timescale ' + ts_body + ' $end'
+                            self.ts_sec = _parse_timescale(ts_body)
+                        elif current_kw == '$scope' and len(body) >= 2:
+                            scope.append(body[1])
+                        elif current_kw == '$upscope':
+                            if scope:
+                                scope.pop()
+                        elif current_kw == '$var' and len(body) >= 4:
+                            vtype = body[0]
+                            try:
+                                w = int(body[1])
+                            except ValueError:
+                                m = re.match(r'\[(\d+):(\d+)\]', body[1])
+                                if m:
+                                    w = abs(int(m.group(1)) - int(m.group(2))) + 1
+                                else:
+                                    current_kw = None
+                                    continue
+                            sym, name = body[2], body[3]
+                            bit_str = body[4] if len(body) > 4 and body[4].startswith('[') else None
+                            raw_vars.append((sym, name, w, bit_str, '.'.join(scope), vtype))
+                        elif current_kw == '$enddefinitions':
+                            done = True
+                        # $comment, $date, $version: drop body
+                        current_kw = None
+                    else:
+                        body.append(tok)
+            self._data_offset = f.tell()
 
         # Phase 2: detect and reassemble bit-exploded signals
-        # bit-exploded: width==1, name has [N] suffix in the $var line
-        bit_groups = defaultdict(dict)  # (scope, base_name) -> {bit_idx: symbol}
+        bit_groups = defaultdict(dict)  # (scope, base_name) -> {bit_idx: sym}
         bit_types = {}                   # (scope, base_name) -> vtype
         standalone = []
 
@@ -219,9 +246,8 @@ class VCDParser:
             standalone.append((sym, name, w, sc, vtype))
 
         # Register standalone signals. Per IEEE 1364-2005 18.2.3.7, the same
-        # identifier_code can be referenced under multiple paths (e.g. one
-        # wire visible from multiple module scopes). Track all references.
-        # When aliases have different var_types, the first encountered wins.
+        # identifier_code can be referenced under multiple paths. First seen
+        # type wins when aliases have different var_types.
         for sym, name, w, sc, vtype in standalone:
             path = '{}.{}'.format(sc, name) if sc else name
             if sym in self.signals:
@@ -231,7 +257,6 @@ class VCDParser:
                     'path': path, 'width': w, 'type': vtype, 'aliases': [path]
                 }
 
-        # Register reassembled bit-exploded signals
         for (sc, name), bits in bit_groups.items():
             if not bits:
                 continue
@@ -265,13 +290,26 @@ class VCDParser:
                     break
         return out
 
+    def _data_tokens(self):
+        """Generator yielding all tokens from the data section."""
+        for t in self._initial_tokens:
+            yield t
+        with open(self.path, 'r', errors='replace') as f:
+            f.seek(self._data_offset)
+            for line in f:
+                for t in line.split():
+                    yield t
+
     def iter_events(self, t0=0, t1=None, sids=None):
         """Yield (time, sig_id, value_str) with bit reassembly.
 
-        Same-timestamp bit changes are buffered and emitted once per signal.
+        Token-based. Handles inline and multi-line simulation_keyword blocks
+        per IEEE 1364-2005 18.2.3.9-12. Initial value changes appearing
+        before any '#T' timestamp are emitted at logical t=0 (typical case:
+        $dumpvars block directly after $enddefinitions without a leading #0).
         """
-        cur_t = -1
-        pending = {}  # sig_id -> value_str (buffered for current timestamp)
+        cur_t = 0
+        pending = {}
 
         def _flush():
             if not pending:
@@ -280,96 +318,106 @@ class VCDParser:
             pending.clear()
             return items
 
-        with open(self.path, 'r', errors='replace') as f:
-            f.seek(self._data_offset)
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('$'):
-                    continue
-
-                if line[0] == '#':
-                    new_t = int(line[1:])
-                    # Flush previous timestamp
-                    if cur_t >= t0:
-                        for sid, val in _flush():
-                            yield cur_t, sid, val
-                    cur_t = new_t
-                    if t1 is not None and cur_t > t1:
+        toks = self._data_tokens()
+        for tok in toks:
+            # Section markers: simulation keywords and $end are no-ops.
+            # Their semantics ($dumpoff makes all values X, $dumpon restores)
+            # are honored by the value_changes the simulator places inside
+            # the block — we just need to parse those value_changes.
+            if tok in _SIM_KEYWORDS or tok == '$end':
+                continue
+            if tok == '$comment':
+                # 18.2.3.1: $comment ... $end can appear in data section
+                for t in toks:
+                    if t == '$end':
                         break
-                    continue
+                continue
+            if tok.startswith('$'):
+                continue  # unknown $keyword, skip
 
-                if cur_t < t0:
-                    # Still parse to maintain bit state
-                    if line[0] in '01xzXZ':
-                        sym = line[1:]
-                        if sym in self._bit_map:
-                            gid, idx = self._bit_map[sym]
-                            self._bit_state[gid][idx] = line[0].lower()
-                    elif line[0] in 'bB':
-                        pass  # multi-bit pre-range, skip
-                    continue
+            if tok.startswith('#') and len(tok) > 1 and tok[1].isdigit():
+                new_t = int(tok[1:])
+                if cur_t >= t0:
+                    for sid, val in _flush():
+                        yield cur_t, sid, val
+                cur_t = new_t
+                if t1 is not None and cur_t > t1:
+                    return
+                continue
 
-                # Parse value
-                if line[0] in '01xzXZ':
-                    val, sym = line[0].lower(), line[1:]
-                elif line[0] in 'bB':
-                    parts = line.split(None, 1)
-                    if len(parts) < 2:
-                        continue
-                    val, sym = parts[0][1:].lower(), parts[1]
-                elif line[0] in 'rR':
-                    parts = line.split(None, 1)
-                    if len(parts) < 2:
-                        continue
-                    val, sym = parts[0][1:], parts[1]
-                elif line[0] == 'p':
-                    # Extended VCD port value (IEEE 1364-2005 18.4.3):
-                    # p<state_char> <strength0> <strength1> <id>
-                    # Map port state to 4-state value for analysis; strengths
-                    # are discarded since they're rarely actionable for debug.
-                    parts = line.split()
-                    if len(parts) < 4:
-                        continue
-                    state = parts[0][1:] if len(parts[0]) > 1 else ''
-                    val = _PORT_STATE.get(state, 'x')
-                    sym = parts[3]
-                else:
-                    continue
+            # Parse one value_change. May consume 1, 2, or 4 tokens.
+            first = tok[0]
+            if first in '01xXzZ':
+                val = first.lower()
+                sym = tok[1:]
+            elif first in 'bB':
+                val = tok[1:].lower()
+                sym = next(toks, None)
+                if sym is None:
+                    break
+            elif first in 'rR':
+                val = tok[1:]
+                sym = next(toks, None)
+                if sym is None:
+                    break
+            elif first == 'p':
+                # Extended VCD (18.4.3): p<state> <s0> <s1> <id>
+                state = tok[1:] if len(tok) > 1 else ''
+                _s0 = next(toks, None)
+                _s1 = next(toks, None)
+                sym = next(toks, None)
+                if sym is None:
+                    break
+                val = _PORT_STATE.get(state, 'x')
+            else:
+                continue  # unparseable token
 
-                # Bit-exploded?
+            # Catch-up before t0: update bit_state only, don't emit
+            if cur_t < t0:
                 if sym in self._bit_map:
                     gid, idx = self._bit_map[sym]
                     self._bit_state[gid][idx] = val
-                    if sids is not None and gid not in sids:
-                        continue
-                    # Reconstruct: MSB first
-                    bits = self._bit_state[gid]
-                    pending[gid] = ''.join(reversed(bits))
-                    continue
+                continue
 
-                # Standalone signal
-                if sym not in self.signals:
+            # Bit-exploded signal: aggregate into virtual bus value
+            if sym in self._bit_map:
+                gid, idx = self._bit_map[sym]
+                self._bit_state[gid][idx] = val
+                if sids is not None and gid not in sids:
                     continue
-                if sids is not None and sym not in sids:
-                    continue
-                pending[sym] = val
+                pending[gid] = ''.join(reversed(self._bit_state[gid]))
+                continue
 
-            # Flush last timestamp
-            if cur_t >= t0:
-                for sid, val in _flush():
-                    yield cur_t, sid, val
+            # Standalone signal
+            if sym not in self.signals:
+                continue
+            if sids is not None and sym not in sids:
+                continue
+            pending[sym] = val
+
+        # Final flush
+        if cur_t >= t0:
+            for sid, val in _flush():
+                yield cur_t, sid, val
 
     def scan_time_range(self):
-        """Quick scan for min/max timestamps."""
+        """Min/max timestamps in the file. If any value_change occurs before
+        the first #T (an initial $dumpvars block), t_min is 0."""
         t_min = t_max = None
-        with open(self.path, 'r', errors='replace') as f:
-            f.seek(self._data_offset)
-            for line in f:
-                if line[0] == '#':
-                    t = int(line.strip()[1:])
-                    if t_min is None:
-                        t_min = t
-                    t_max = t
+        saw_initial_data = False
+        for tok in self._data_tokens():
+            if tok.startswith('#') and len(tok) > 1 and tok[1].isdigit():
+                try:
+                    t = int(tok[1:])
+                except ValueError:
+                    continue
+                if t_min is None:
+                    t_min = 0 if saw_initial_data else t
+                t_max = t
+            elif t_min is None and tok and tok[0] in '01xXzZbBrRp':
+                saw_initial_data = True
+        if t_min is None and saw_initial_data:
+            t_min = t_max = 0
         return t_min, t_max
 
 
@@ -553,85 +601,6 @@ def cmd_edges(vcd, args):
             print(line)
 
 
-def cmd_handshake(vcd, args):
-    ts = vcd.ts_sec
-    t0 = parse_time(args.begin, ts) if args.begin else 0
-    t1 = parse_time(args.end, ts) if args.end else None
-    sids = vcd.match(args.filter)
-
-    # Auto-discover AXI-Stream groups by tvalid/tready/tdata/tlast naming
-    groups = defaultdict(dict)
-    for sid, info in vcd.signals.items():
-        if sids is not None and sid not in sids:
-            continue
-        name = info['path'].split('.')[-1].lower()
-        # Strip bit range suffix like [511:0]
-        base = re.sub(r'\[\d+:\d+\]$', '', name)
-        for suffix, role in [('tvalid', 'valid'), ('tready', 'ready'),
-                             ('tdata', 'data'), ('tlast', 'last')]:
-            if base.endswith(suffix):
-                prefix = info['path'][:-(len(name))] + base[:-(len(suffix))]
-                groups[prefix][role] = sid
-                break
-
-    if not groups:
-        print('No AXI-Stream signal groups found (need tvalid/tready naming)')
-        return
-
-    all_res = []
-    for prefix, roles in sorted(groups.items()):
-        if 'valid' not in roles or 'ready' not in roles:
-            continue
-        group_sids = set(roles.values())
-        state = {}
-        transfers = []
-        # Buffer per-timestamp for correct same-cycle behavior
-        pend_t, pend_chg, has_ctrl = None, {}, False
-
-        def _check():
-            for s, v in pend_chg.items():
-                state[s] = v
-            pend_chg.clear()
-            v = state.get(roles['valid'], '0')
-            r = state.get(roles['ready'], '0')
-            if v == '1' and r == '1' and has_ctrl:
-                xf = {'time': pend_t, 'time_h': fmt_time(pend_t, ts)}
-                if 'data' in roles and roles['data'] in state:
-                    dsid = roles['data']
-                    xf['data'] = fmt_val(state[dsid], vcd.signals[dsid])
-                if 'last' in roles and roles['last'] in state:
-                    xf['last'] = state[roles['last']] == '1'
-                transfers.append(xf)
-
-        for t, sid, val in vcd.iter_events(t0, t1, group_sids):
-            if t != pend_t:
-                if pend_t is not None:
-                    _check()
-                pend_t, has_ctrl = t, False
-            pend_chg[sid] = val
-            if sid in (roles['valid'], roles['ready']):
-                has_ctrl = True
-        if pend_t is not None:
-            _check()
-
-        res = {
-            'channel': prefix,
-            'transfer_count': len(transfers),
-            'transfers': transfers,
-        }
-        all_res.append(res)
-
-    if args.json:
-        print(json.dumps(all_res, indent=2, ensure_ascii=False))
-    else:
-        for r in all_res:
-            print('\n=== {} ({} transfers) ==='.format(r['channel'], r['transfer_count']))
-            for i, x in enumerate(r['transfers'][:200]):
-                last = ' LAST' if x.get('last') else ''
-                print('  {:>4}  {:<14}  {}{}'.format(i, x['time_h'], x.get('data', '-'), last))
-            if len(r['transfers']) > 200:
-                print('  ... {} total, showing first 200'.format(len(r['transfers'])))
-
 
 def _build_snapshot(vcd, t_at, sids=None):
     """Replay from start to t_at, return {sig_id: value}."""
@@ -735,7 +704,8 @@ def _add_time_args(sp):
                     help='end time, same format (omit = no upper bound)')
 
 def _add_filter(sp):
-    sp.add_argument('--filter', metavar='K1,K2,...', type=lambda s: s.split(','),
+    sp.add_argument('--filter', metavar='K1,K2,...',
+                    type=lambda s: [k.strip() for k in s.split(',') if k.strip()],
                     help='comma-separated keywords, substring-matched against signal paths')
 
 def main():
@@ -763,9 +733,6 @@ def main():
     sp = sub.add_parser('edges', help='1-bit edge detection with frequency estimation')
     sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp)
 
-    sp = sub.add_parser('handshake', help='AXI-Stream valid&ready transfer analysis (auto-discovers tvalid/tready pairs)')
-    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp)
-
     sp = sub.add_parser('snapshot', help='all signal values at a given time point')
     sp.add_argument('file', metavar='<file>')
     sp.add_argument('--at', metavar='TIME', required=True, help='time point, e.g. 17.55us')
@@ -789,7 +756,7 @@ def main():
 
     vcd = VCDParser(args.file)
     cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
-            'edges': cmd_edges, 'handshake': cmd_handshake, 'snapshot': cmd_snapshot,
+            'edges': cmd_edges, 'snapshot': cmd_snapshot,
             'compare': cmd_compare, 'search': cmd_search}
     cmds[args.cmd](vcd, args)
 

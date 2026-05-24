@@ -42,7 +42,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.1.6'
+__version__ = '1.1.7'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -89,8 +89,12 @@ class _TimeParseError(ValueError):
 def parse_time(s, ts_sec):
     """Parse time string with optional unit suffix to internal VCD timestamp.
 
-    VCD timestamps per IEEE 1364-2005 18.2.3.8 are non-negative integers;
-    bare '-1' and '-5ns' are rejected as invalid input.
+    VCD timestamps per IEEE 1364-2005 18.2.3.8 are non-negative integers.
+    - With unit: any positive value, scaled to ticks (e.g. '17.5us')
+    - Without unit: must be a non-negative integer tick count
+
+    Bare '10.5' (no unit) is rejected to avoid silent int() truncation;
+    use '10.5ns' to specify a fractional time.
     """
     if s is None:
         return None
@@ -107,8 +111,14 @@ def parse_time(s, ts_sec):
             raise _TimeParseError(
                 'time must be non-negative; got {!r}'.format(s))
         return v
-    val, unit = float(m.group(1)), m.group(2)
-    return int(val) if unit is None else int(round(val * _UNITS[unit] / ts_sec))
+    val_str, unit = m.group(1), m.group(2)
+    if unit is None:
+        if '.' in val_str:
+            raise _TimeParseError(
+                'bare numeric time must be integer ticks; got {!r}. '
+                'Use a unit suffix for fractional times, e.g. {}ns'.format(s, val_str))
+        return int(val_str)
+    return int(round(float(val_str) * _UNITS[unit] / ts_sec))
 
 
 def fmt_time(ts, ts_sec):
@@ -267,7 +277,20 @@ class VCDParser:
                                     current_kw = None
                                     continue
                             sym, name = body[2], body[3]
-                            bit_str = body[4] if len(body) > 4 and body[4].startswith('[') else None
+                            # Per IEEE 1364 free-format, the bracket reference
+                            # range can be split into several tokens, e.g.
+                            # 'data [7 : 0]' → ['data', '[7', ':', '0]'].
+                            # Collect tokens from body[4] until one ends with
+                            # ']' and join (split() already dropped whitespace).
+                            bit_str = None
+                            if len(body) > 4 and body[4].startswith('['):
+                                parts = []
+                                for t in body[4:]:
+                                    parts.append(t)
+                                    if ']' in t:
+                                        break
+                                if parts and ']' in parts[-1]:
+                                    bit_str = ''.join(parts)
                             # Per IEEE 1364-2005 18.2.3.7 reference syntax:
                             #   identifier [bit_select_index]      → single bit
                             #   identifier [msb_index : lsb_index] → range
@@ -310,11 +333,15 @@ class VCDParser:
                     continue
             standalone.append((sym, name, w, sc, vtype))
 
-        # Partition bit_groups: contiguous-from-0 → reassemble; else → singletons
+        # Partition bit_groups: contiguous-from-0 with ≥2 bits → reassemble;
+        # everything else → individual bit-select references. A single
+        # '[0]' declaration alone is NOT a bus — it's a partial dump that
+        # happens to use bit 0; synthesizing it as 'data[0:0]' would lie
+        # about the file structure.
         non_contiguous = set()
         for key, bits in bit_groups.items():
             indices = set(bits.keys())
-            if indices != set(range(max(indices) + 1)):
+            if len(indices) < 2 or indices != set(range(max(indices) + 1)):
                 non_contiguous.add(key)
 
         # Each non-contiguous bit-select becomes a standalone 'name[idx]' signal
@@ -430,14 +457,19 @@ class VCDParser:
             return pushback.pop() if pushback else next(raw, None)
 
         def _looks_structural(t):
-            """True only if t is a timestamp (#<digit>...) — that's the
-            single form that cannot be a legal identifier_code in the
-            position after b/r/p. $keywords COULD be identifier_codes
-            per IEEE 1364-2005 18.2.1 (any printable ASCII), so they are
-            only treated as section headers at top-level positions."""
+            """True only if t is a timestamp (#<digit>...) AND not a
+            declared identifier_code. Per IEEE 1364-2005 18.2.1,
+            identifier_code is any printable ASCII string, so '#1' can be
+            both a legal symbol and (in another position) a timestamp.
+            Disambiguate by checking the declared identifier table — if
+            the file declared a $var with this identifier, it IS the
+            symbol; otherwise treat as a stray timestamp from malformed
+            input and push it back."""
             if t is None:
                 return True
-            return t.startswith('#') and len(t) > 1 and t[1].isdigit()
+            if t.startswith('#') and len(t) > 1 and t[1].isdigit():
+                return t not in self.signals and t not in self._bit_map
+            return False
 
         while True:
             tok = _next()
@@ -500,14 +532,28 @@ class VCDParser:
                     continue
                 val = body
             elif first == 'p':
-                # Extended VCD (18.4.3): p<state> <s0> <s1> <id>
+                # Extended VCD (18.4.3.1): p<state> <s0> <s1> <id>
+                # Strength components are single digits 0-7. Validate
+                # before consuming further tokens so a malformed
+                # 'pH #10 1!' doesn't swallow the #10 timestamp.
                 state = tok[1:] if len(tok) > 1 else ''
                 _s0 = _next()
+                if _s0 is None or len(_s0) != 1 or _s0 not in '01234567':
+                    if _s0 is not None:
+                        pushback.append(_s0)
+                    continue
                 _s1 = _next()
+                if _s1 is None or len(_s1) != 1 or _s1 not in '01234567':
+                    if _s1 is not None:
+                        pushback.append(_s1)
+                    pushback.append(_s0)
+                    continue
                 sym = _next()
                 if _looks_structural(sym):
                     if sym is not None:
                         pushback.append(sym)
+                    pushback.append(_s1)
+                    pushback.append(_s0)
                     continue
                 val = _PORT_STATE.get(state, 'x')
             else:
@@ -559,7 +605,10 @@ class VCDParser:
             return pushback.pop() if pushback else next(raw, None)
         def _is_struct(t):
             if t is None: return True
-            return t.startswith('#') and len(t) > 1 and t[1].isdigit()
+            if t.startswith('#') and len(t) > 1 and t[1].isdigit():
+                # Declared identifier_code with #-form is not a timestamp
+                return t not in self.signals and t not in self._bit_map
+            return False
 
         while True:
             tok = _next()
@@ -608,11 +657,24 @@ class VCDParser:
                 if t_min is None:
                     saw_initial_data = True
             elif first == 'p':
-                _next(); _next()
+                # Validate strength tokens before consuming further
+                _s0 = _next()
+                if _s0 is None or len(_s0) != 1 or _s0 not in '01234567':
+                    if _s0 is not None:
+                        pushback.append(_s0)
+                    continue
+                _s1 = _next()
+                if _s1 is None or len(_s1) != 1 or _s1 not in '01234567':
+                    if _s1 is not None:
+                        pushback.append(_s1)
+                    pushback.append(_s0)
+                    continue
                 sym = _next()
                 if _is_struct(sym):
                     if sym is not None:
                         pushback.append(sym)
+                    pushback.append(_s1)
+                    pushback.append(_s0)
                     continue
                 if t_min is None:
                     saw_initial_data = True

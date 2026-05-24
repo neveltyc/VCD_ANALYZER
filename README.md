@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.1.6`
+        Version `1.1.7`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Add explicit structural-token checks during event parsing.
-- Reduce accidental consumption of timestamps and section markers as identifiers.
-- Keep edges and legacy search covered in the test suite.
+        - Refine section skipping and malformed timestamp recovery paths.
+- Continue hardening the tolerant-reader behavior for imperfect VCD files.
+- Preserve the pre-interval legacy search interface.
 
         ## Commands
 

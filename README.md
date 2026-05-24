@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.2.8`
+        Version `1.2.9`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Add dedicated VCD timestamp token validation.
-- Reduce the risk of malformed timestamps corrupting downstream analysis.
-- Keep the legacy search tests intact against sanitized fixtures.
+        - Introduce bounded integer parsing for widths and bit indices.
+- Harden header parsing against split or oversized numeric fields.
+- Retain the same regression-friendly fixture layout.
 
         ## Commands
 

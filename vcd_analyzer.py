@@ -43,7 +43,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.2.8'
+__version__ = '1.2.9'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -82,6 +82,15 @@ MAX_TIME_ARG_LEN = 100         # CLI/programmatic time string length cap
 MAX_TIME_TICKS = (1 << 63) - 1  # int64 max — keeps downstream arithmetic safe
 MAX_FILTER_PATTERN_LEN = 256
 MAX_FILTER_WILDCARDS = 16
+
+# Additional header-section caps. Defaults are far above any legitimate
+# engineering VCD but cleanly refuse pathological/malicious construction.
+MAX_INT_DIGITS = 100              # any int-from-string in header (width, bit idx, msb/lsb)
+MAX_SIGNAL_WIDTH = MAX_REASSEMBLE_BITS  # max bits per single $var declaration
+MAX_HEADER_BODY_TOKENS = 131072   # any $<kw>...$end section body length
+MAX_COMMENTS = 1024               # number of $comment sections retained
+MAX_SCOPE_DEPTH = 64              # $scope nesting depth
+MAX_INITIAL_TOKENS = 131072       # tokens buffered from same line as $enddefinitions $end
 
 
 # IEEE 1364-2005 18.2.2 real value_change is 'r' + real_number where
@@ -186,6 +195,28 @@ def _parse_vcd_timestamp_token(tok):
         raise _VCDResourceError(
             'VCD timestamp too large: got {}, max ticks is {}'.format(v, MAX_TIME_TICKS))
     return v
+
+
+def _safe_int_digits(s):
+    """Parse a digit string from VCD header to int with bounded cost.
+
+    Used wherever the header declares an integer in user-controlled
+    position: $var width, [msb:lsb] range, [N] bit index. Returns int
+    on success, None for empty / malformed / oversized inputs. Never
+    raises — caller decides whether to skip the declaration or raise
+    _VCDResourceError with richer context.
+
+    Length cap MAX_INT_DIGITS=100 defends against the same Python 3.9
+    O(n^2) decimal-int and Python 3.11+ PEP 678 ValueError issues as
+    _parse_vcd_timestamp_token. 100 digits is far beyond any legitimate
+    bit width or index (which fit in 4 digits comfortably).
+    """
+    if not s or len(s) > MAX_INT_DIGITS:
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        return None
 
 
 def parse_time(s, ts_sec):
@@ -316,8 +347,16 @@ def fmt_val(value, info):
 
 
 def val_to_int(value):
-    """Try converting to int, None on x/z."""
+    """Try converting to int, None on x/z or pathologically long values.
+
+    int(s, 2) is O(n) for base-2 (PEP 678 does not apply to power-of-two
+    bases) so the worst case after MAX_SIGNAL_WIDTH=65536 is sub-ms — but
+    we cap anyway as defense in depth, in case a future code path lets
+    an unbounded value reach here.
+    """
     if 'x' in value or 'z' in value:
+        return None
+    if len(value) > MAX_SIGNAL_WIDTH:
         return None
     try:
         return int(value, 2) if len(value) > 1 else int(value)
@@ -431,7 +470,12 @@ class VCDParser:
                     break
                 for tok in line.split():
                     if done:
-                        self._initial_tokens.append(tok)
+                        # Buffer tokens that share the same line as
+                        # `$enddefinitions $end`. Cap defends against
+                        # a malicious VCD packing the entire data stream
+                        # on the same line as the header terminator.
+                        if len(self._initial_tokens) < MAX_INITIAL_TOKENS:
+                            self._initial_tokens.append(tok)
                         continue
                     if current_kw is None:
                         if tok in _DECL_KEYWORDS:
@@ -445,6 +489,12 @@ class VCDParser:
                             self.ts_str = '$timescale ' + ts_body + ' $end'
                             self.ts_sec = _parse_timescale(ts_body)
                         elif current_kw == '$scope' and len(body) >= 2:
+                            # Cap nesting depth to defend against
+                            # 1M-level $scope-without-$upscope construction.
+                            if len(scope) >= MAX_SCOPE_DEPTH:
+                                raise _VCDResourceError(
+                                    '$scope nesting depth exceeds {}; '
+                                    'file may be corrupt or malicious'.format(MAX_SCOPE_DEPTH))
                             scope.append(body[1])
                         elif current_kw == '$upscope':
                             if scope:
@@ -469,15 +519,32 @@ class VCDParser:
                                 if not m:
                                     current_kw = None
                                     continue
-                                w = abs(int(m.group(1)) - int(m.group(2))) + 1
+                                msb = _safe_int_digits(m.group(1))
+                                lsb = _safe_int_digits(m.group(2))
+                                if msb is None or lsb is None:
+                                    # Overlong or malformed digits — skip
+                                    # this $var rather than abort, since
+                                    # the rest of the header may still be
+                                    # useful.
+                                    current_kw = None
+                                    continue
+                                w = abs(msb - lsb) + 1
                                 idx = idx_after_size
                             else:
-                                try:
-                                    w = int(body[1])
-                                except ValueError:
+                                w = _safe_int_digits(body[1])
+                                if w is None:
                                     current_kw = None
                                     continue
                                 idx = 2
+                            # Hazard 1 mitigation: refuse pathological widths
+                            # before they reach fmt_val (which would try to
+                            # allocate `pad * (width - len(value))` bytes).
+                            # Real signals never approach MAX_SIGNAL_WIDTH.
+                            if w <= 0 or w > MAX_SIGNAL_WIDTH:
+                                raise _VCDResourceError(
+                                    '$var width {} exceeds max {}; '
+                                    'file may be corrupt or malicious'.format(
+                                        w, MAX_SIGNAL_WIDTH))
                             if len(body) <= idx + 1:
                                 current_kw = None
                                 continue
@@ -516,11 +583,19 @@ class VCDParser:
                             self.version = ' '.join(body)
                         elif current_kw == '$comment':
                             # Per 18.2.3.1, $comment may appear multiple
-                            # times in header; collect all.
-                            self.comments.append(' '.join(body))
+                            # times in header; collect all up to a cap to
+                            # defend against 1M-comment construction.
+                            if len(self.comments) < MAX_COMMENTS:
+                                self.comments.append(' '.join(body))
                         current_kw = None
                     else:
-                        body.append(tok)
+                        # Bound section body. Defends against a malicious
+                        # VCD packing megabytes of tokens inside a $comment
+                        # (or any other section) before $end. Tokens beyond
+                        # the cap are silently dropped; the $end terminator
+                        # still closes the section correctly.
+                        if len(body) < MAX_HEADER_BODY_TOKENS:
+                            body.append(tok)
             self._data_offset = f.tell()
 
         # Phase 2: detect and reassemble bit-exploded signals.
@@ -539,7 +614,12 @@ class VCDParser:
             if w == 1 and bit_str is not None:
                 m = re.match(r'\[(\d+)\]', bit_str)
                 if m:
-                    idx = int(m.group(1))
+                    idx = _safe_int_digits(m.group(1))
+                    if idx is None:
+                        # Overlong/malformed bit index — treat the $var as
+                        # a standalone signal (its bit_str folded back).
+                        standalone.append((sym, name + bit_str, 1, sc, vtype))
+                        continue
                     group = bit_groups[(sc, name)]
                     group[idx] = sym
                     # Resource cap: refuse to allocate gigantic synthesized

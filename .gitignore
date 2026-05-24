@@ -1,0 +1,9 @@
+.pytest_cache/
+archive/
+ieeestand1364-2005/
+tmp*/
+vcd_analyzer_1_3_6.py
+vcd_analyzer_1_3_7.py
+vcd_analyzer_1_3_6_with_tests.zip
+_fixture_*.vcd
+_rebuild_history.py

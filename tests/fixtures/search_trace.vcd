@@ -1,0 +1,36 @@
+$timescale 1ns $end
+$scope module tb $end
+$var wire 1 ! valid $end
+$var wire 1 " ready $end
+$var wire 8 # data $end
+$var wire 1 $ tap $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+0!
+0"
+b00000000 #
+0$
+$end
+#10
+1!
+b00010000 #
+#20
+1"
+#25
+b00100000 #
+#30
+0!
+#40
+0"
+1$
+#60
+0$
+#70
+x!
+#80
+0!
+#90
+1!
+#100
+0!

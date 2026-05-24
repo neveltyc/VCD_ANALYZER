@@ -1,0 +1,35 @@
+$timescale 1ns $end
+$scope module tb $end
+$var wire 1 ! clk $end
+$var wire 1 " rst_n $end
+$var wire 3 # state $end
+$var wire 8 $ data $end
+$var wire 1 % flag $end
+$upscope $end
+$enddefinitions $end
+#0
+0!
+0"
+b000 #
+b00000000 $
+0%
+#5
+1!
+#10
+0!
+1"
+b001 #
+b00010001 $
+#15
+1!
+#20
+0!
+b010 #
+1%
+#25
+1!
+#30
+0!
+b011 #
+b00100010 $
+0%

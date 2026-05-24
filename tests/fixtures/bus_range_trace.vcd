@@ -1,0 +1,7 @@
+$timescale 1ns $end
+$scope module tb $end
+$var wire 8 ! data [7:0] $end
+$upscope $end
+$enddefinitions $end
+#0
+b00000001 !

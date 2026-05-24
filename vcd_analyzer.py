@@ -9,9 +9,9 @@ Commands:
   dump       <file> [--begin T] [--end T] [--filter K1,K2]   Print signal value changes in time order
   summary    <file> [--begin T] [--end T] [--filter K1,K2]   Per-signal stats: change count, unique values, static detection
   edges      <file> [--begin T] [--end T] [--filter K1,K2]   1-bit edge detection with frequency estimation
-  snapshot   <file> --at T [--filter K1,K2]        All signal values at a given time point
+  snapshot   <file> --at T [--filter K1,K2]        Known signal values at a given time point
   compare    <file> --at T1,T2 [--filter K1,K2]    Diff signal values between two time points
-  search     <file> --value V [--signal K] [--begin T] [--end T] [--filter K1,K2]   Find when signal equals a value
+  search     <file> --value V [--signal K] [--begin T] [--end T] [--filter K1,K2]   Find intervals where signal state equals a value
 
 Global option:
   --json    Output structured JSON instead of text (for programmatic parsing)
@@ -42,7 +42,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.1.7'
+__version__ = '1.1.8'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -785,49 +785,76 @@ def cmd_summary(vcd, args):
     ts = vcd.ts_sec
     t0 = parse_time(args.begin, ts) if args.begin else 0
     t1 = parse_time(args.end, ts) if args.end else None
-    sids = vcd.match(args.filter)
+    if t1 is not None and t1 < t0:
+        raise _TimeParseError('end time must be >= begin time')
+    sids = _selected_sids(vcd, vcd.match(args.filter))
+
+    initial = _build_snapshot(vcd, t0, sids)
     stats = {}
+    for sid, val in initial.items():
+        stats[sid] = {
+            'changes': 0, 'first_at': None, 'last_at': t0,
+            'initial': val, 'last': val, 'unique': {val}
+        }
+
     for t, sid, val in vcd.iter_events(t0, t1, sids):
         if sid not in stats:
-            stats[sid] = {'n': 0, 't0': t, 't1': t, 'v0': val, 'v1': val, 'uv': set()}
+            stats[sid] = {
+                'changes': 0, 'first_at': None, 'last_at': t,
+                'initial': None, 'last': None, 'unique': set()
+            }
         s = stats[sid]
-        s['n'] += 1
-        s['t1'] = t
-        s['v1'] = val
-        s['uv'].add(val)
+        s['changes'] += 1
+        if s['first_at'] is None:
+            s['first_at'] = t
+        s['last_at'] = t
+        s['last'] = val
+        s['unique'].add(val)
 
     rows = []
     for sid in sorted(stats, key=lambda s: vcd.signals[s]['path']):
         info, s = vcd.signals[sid], stats[sid]
+        cat = 'static' if s['changes'] == 0 and s['initial'] is not None else 'active'
         rows.append({
-            'path': info['path'], 'width': info['width'], 'changes': s['n'],
-            'unique': len(s['uv']),
-            'first_at': fmt_time(s['t0'], ts), 'last_at': fmt_time(s['t1'], ts),
-            'last_val': fmt_val(s['v1'], info),
+            'path': info['path'], 'width': info['width'], 'category': cat,
+            'changes': s['changes'], 'unique': len(s['unique']),
+            'initial_val': fmt_val(s['initial'], info) if s['initial'] is not None else '(undef)',
+            'last_val': fmt_val(s['last'], info) if s['last'] is not None else '(undef)',
+            'first_change_at': fmt_time(s['first_at'], ts) if s['first_at'] is not None else None,
+            'last_change_at': fmt_time(s['last_at'], ts) if s['changes'] else None,
         })
-    if args.json:
-        print(json.dumps(rows, indent=2, ensure_ascii=False))
-    else:
-        active = [r for r in rows if r['changes'] > 1]
-        static = [r for r in rows if r['changes'] <= 1]
-        if active:
-            for r in active:
-                print('  {:<45} w={:<4} chg={:<6} uniq={:<4} last@{:<12} = {}'.format(
-                    r['path'], r['width'], r['changes'], r['unique'],
-                    r['last_at'], r['last_val']))
-        top = sorted(active, key=lambda x: x['changes'], reverse=True)[:5]
-        if top:
-            print('\nTop active:')
-            for r in top:
-                print('  {:<50} {} changes, {} unique values'.format(
-                    r['path'], r['changes'], r['unique']))
-        if static:
-            print('\nStatic ({}):{}'.format(
-                len(static),
-                ' [use --json for full list]' if len(static) > 20 else ''))
-            for r in static[:20]:
-                print('  {:<55} = {}'.format(r['path'], r['last_val']))
 
+    active = [r for r in rows if r['category'] == 'active']
+    static = [r for r in rows if r['category'] == 'static']
+    limit = max(0, getattr(args, 'limit', 50))
+
+    if args.json:
+        clipped = rows if limit == 0 else rows[:limit]
+        print(json.dumps({
+            'begin': fmt_time(t0, ts),
+            'end': fmt_time(t1, ts) if t1 is not None else None,
+            'total': len(rows), 'active': len(active), 'static': len(static),
+            'truncated': limit != 0 and len(rows) > limit,
+            'rows': clipped,
+        }, indent=2, ensure_ascii=False))
+    else:
+        print('Summary: {} known signals ({} active, {} static)'.format(
+            len(rows), len(active), len(static)))
+        if active:
+            print('\nActive ({}):{}'.format(
+                len(active), ' [showing first {}]'.format(limit) if limit and len(active) > limit else ''))
+            for r in (active if limit == 0 else active[:limit]):
+                print('  {:<45} w={:<4} chg={:<6} uniq={:<4} init={} last={}'.format(
+                    r['path'], r['width'], r['changes'], r['unique'],
+                    r['initial_val'], r['last_val']))
+        if static:
+            s_limit = limit if limit else len(static)
+            print('\nStatic known ({}):{}'.format(
+                len(static), ' [showing first {}]'.format(s_limit) if len(static) > s_limit else ''))
+            for r in static[:s_limit]:
+                print('  {:<55} = {}'.format(r['path'], r['last_val']))
+        if not rows:
+            print('(no known values in the selected time range)')
 
 def cmd_edges(vcd, args):
     ts = vcd.ts_sec
@@ -895,13 +922,68 @@ def cmd_edges(vcd, args):
 
 
 
+def _selected_sids(vcd, sids):
+    """Return an explicit set of selected signal ids."""
+    return set(vcd.signals.keys()) if sids is None else set(sids)
+
+
 def _build_snapshot(vcd, t_at, sids=None):
-    """Replay from start to t_at, return {sig_id: value}."""
+    """Replay from start to t_at, return known {sig_id: value} only."""
     state = {}
     for t, sid, val in vcd.iter_events(0, t_at, sids):
         state[sid] = val
     return state
 
+
+def _parse_target_value(text):
+    """Parse search target once. Raw string is kept for x/z matches;
+    integer form is used for width-independent numeric matches."""
+    raw = text.lower().strip()
+    intval = None
+    try:
+        if raw.startswith(('0x', '0X')):
+            intval = int(raw, 16)
+        elif raw.startswith('0b'):
+            intval = int(raw[2:], 2)
+        elif raw.startswith('b'):
+            intval = int(raw[1:], 2)
+        else:
+            intval = int(raw)
+    except ValueError:
+        pass
+    return raw, intval
+
+
+def _value_matches(value, target_raw, target_int):
+    if value == target_raw:
+        return True
+    if target_int is None:
+        return False
+    iv = val_to_int(value)
+    return iv is not None and iv == target_int
+
+
+def _signal_value_intervals(vcd, t0, t1, sids):
+    """Yield stable known-value intervals per selected signal.
+
+    Each item is (sid, start_t, end_t, value). Unknown time before a signal's
+    first observed value is omitted rather than guessed as x/undef.
+    """
+    state = _build_snapshot(vcd, t0, sids)
+    start = {sid: t0 for sid in state}
+    for t, sid, val in vcd.iter_events(t0, t1, sids):
+        if t <= t0:
+            continue
+        if sid in state:
+            yield sid, start[sid], t, state[sid]
+        state[sid] = val
+        start[sid] = t
+    end_t = t1
+    if end_t is None:
+        _mn, mx = vcd.scan_time_range()
+        end_t = mx if mx is not None else t0
+    for sid, val in state.items():
+        yield sid, start[sid], end_t, val
 
 def cmd_snapshot(vcd, args):
     ts = vcd.ts_sec
@@ -915,11 +997,12 @@ def cmd_snapshot(vcd, args):
     if args.json:
         print(json.dumps({'at': fmt_time(t_at, ts), 'signals': rows}, indent=2, ensure_ascii=False))
     else:
-        print('Snapshot @ {}'.format(fmt_time(t_at, ts)))
+        print('Known snapshot @ {}'.format(fmt_time(t_at, ts)))
         for r in rows:
             print('  {:<55} = {}'.format(r['path'], r['value']))
-        print('\n{} signals'.format(len(rows)))
-
+        print('\n{} known signals'.format(len(rows)))
+        if not rows:
+            print('(no known values at this time point)')
 
 def cmd_compare(vcd, args):
     ts = vcd.ts_sec
@@ -958,53 +1041,65 @@ def cmd_compare(vcd, args):
 def cmd_search(vcd, args):
     ts = vcd.ts_sec
     t0 = parse_time(args.begin, ts) if args.begin else 0
-    t1 = parse_time(args.end, ts) if args.end else None
-    flt = [args.signal] if args.signal else args.filter
-    sids = vcd.match(flt)
-    target = args.value.lower().strip()
-    # Parse target once. Per VCD value-shortening rules (Table 18-2), the
-    # raw stored bits may be shorter than the user's typed full-width form
-    # (e.g. user types '0010' for a 4-bit signal whose VCD raw is '10'),
-    # so direct string compare fails. Numeric compare bridges this gap.
-    # Supported prefixes:
-    #   0x... / 0X...  hex
-    #   0b... / b...   binary (avoids ambiguity with leading-zero decimals
-    #                  like '0010' which Python int() treats as decimal 10)
-    #   no prefix      decimal (kept for backward compat)
-    target_int = None
-    try:
-        if target.startswith(('0x', '0X')):
-            target_int = int(target, 16)
-        elif target.startswith('0b'):
-            target_int = int(target[2:], 2)
-        elif target.startswith('b'):
-            target_int = int(target[1:], 2)
-        else:
-            target_int = int(target)
-    except ValueError:
-        pass
-    matches = []
-    for t, sid, val in vcd.iter_events(t0, t1, sids):
-        hit = (val == target)
-        if not hit and target_int is not None:
-            iv = val_to_int(val)
-            if iv is not None and iv == target_int:
-                hit = True
-        if hit:
-            info = vcd.signals[sid]
-            matches.append({'time': fmt_time(t, ts), 'path': info['path'],
-                            'value': fmt_val(val, info)})
-    if args.json:
-        print(json.dumps(matches, indent=2, ensure_ascii=False))
+    if args.end:
+        t1 = parse_time(args.end, ts)
     else:
-        if not matches:
-            print('No match for value "{}"'.format(args.value))
+        _mn, mx = vcd.scan_time_range()
+        t1 = mx if mx is not None else t0
+    if t1 < t0:
+        raise _TimeParseError('end time must be >= begin time')
+
+    flt = [args.signal] if args.signal else args.filter
+    sids0 = vcd.match(flt)
+    sids = _selected_sids(vcd, sids0)
+    if not sids:
+        msg = 'No signals match the given filter'
+        if args.json:
+            print(json.dumps({'begin': fmt_time(t0, ts), 'end': fmt_time(t1, ts),
+                              'total': 0, 'matches': [], 'message': msg},
+                             indent=2, ensure_ascii=False))
         else:
-            print('Found {} matches for value "{}":'.format(len(matches), args.value))
-            for m in matches[:200]:
-                print('  {:<14} {:<50} = {}'.format(m['time'], m['path'], m['value']))
-            if len(matches) > 200:
-                print('  ... {} total'.format(len(matches)))
+            print(msg)
+        return
+
+    target_raw, target_int = _parse_target_value(args.value)
+    matches = []
+    known_sids = set()
+    for sid, a, b, val in _signal_value_intervals(vcd, t0, t1, sids):
+        known_sids.add(sid)
+        if _value_matches(val, target_raw, target_int):
+            info = vcd.signals[sid]
+            matches.append({
+                'start': fmt_time(a, ts), 'end': fmt_time(b, ts),
+                'path': info['path'], 'value': fmt_val(val, info),
+            })
+
+    limit = max(0, getattr(args, 'limit', 200))
+    shown = matches if limit == 0 else matches[:limit]
+    if args.json:
+        print(json.dumps({
+            'begin': fmt_time(t0, ts), 'end': fmt_time(t1, ts),
+            'searched_signals': len(sids), 'defined_signals': len(known_sids),
+            'target': args.value, 'total': len(matches),
+            'truncated': limit != 0 and len(matches) > limit,
+            'matches': shown,
+        }, indent=2, ensure_ascii=False))
+        return
+
+    if matches:
+        print('Found {} interval(s) where value == "{}":'.format(len(matches), args.value))
+        for m in shown:
+            print('  {:<14} .. {:<14} {:<50} = {}'.format(
+                m['start'], m['end'], m['path'], m['value']))
+        if limit and len(matches) > limit:
+            print('  ... {} total'.format(len(matches)))
+    else:
+        if not known_sids:
+            print('No defined values in {}..{} for selected signals'.format(
+                fmt_time(t0, ts), fmt_time(t1, ts)))
+        else:
+            print('No interval in {}..{} where selected signals equal "{}"'.format(
+                fmt_time(t0, ts), fmt_time(t1, ts), args.value))
 
 
 # -- CLI entry ---------------------------------------------------------------
@@ -1039,13 +1134,14 @@ def main():
     sp = sub.add_parser('dump', help='print signal value changes in time order')
     sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp)
 
-    sp = sub.add_parser('summary', help='per-signal stats: change count, unique values, static detection')
+    sp = sub.add_parser('summary', help='per-signal stats over a time window, including carried static known values')
     sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp)
+    sp.add_argument('--limit', type=int, default=50, help='max rows to print/return; 0 = unlimited')
 
     sp = sub.add_parser('edges', help='1-bit edge detection with frequency estimation')
     sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp)
 
-    sp = sub.add_parser('snapshot', help='all signal values at a given time point')
+    sp = sub.add_parser('snapshot', help='known signal values at a given time point')
     sp.add_argument('file', metavar='<file>')
     sp.add_argument('--at', metavar='TIME', required=True, help='time point, e.g. 17.55us')
     _add_filter(sp)
@@ -1055,11 +1151,12 @@ def main():
     sp.add_argument('--at', metavar='T1,T2', required=True, help='two time points comma-separated, e.g. 17.5us,17.7us')
     _add_filter(sp)
 
-    sp = sub.add_parser('search', help='find when a signal equals a specific value')
+    sp = sub.add_parser('search', help='find stable intervals where signal state equals a value')
     sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp)
     sp.add_argument('--signal', metavar='KEYWORD', help='keyword to narrow which signals to search')
     sp.add_argument('--value', metavar='VAL', required=True,
                     help='target value: decimal (42), hex (0x2a), or binary (101010)')
+    sp.add_argument('--limit', type=int, default=200, help='max intervals to print/return; 0 = unlimited')
 
     args = p.parse_args()
     if not args.cmd:

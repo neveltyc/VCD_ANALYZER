@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.1.7`
+        Version `1.1.8`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Refine section skipping and malformed timestamp recovery paths.
-- Continue hardening the tolerant-reader behavior for imperfect VCD files.
-- Preserve the pre-interval legacy search interface.
+        - Upgrade legacy value search from point hits to interval-style results.
+- Add explicit target parsing and width-aware value matching helpers.
+- Keep edge analysis available while modernizing the search output payload.
 
         ## Commands
 
@@ -38,9 +38,9 @@ Commands:
   dump       <file> [--begin T] [--end T] [--filter K1,K2]   Print signal value changes in time order
   summary    <file> [--begin T] [--end T] [--filter K1,K2]   Per-signal stats: change count, unique values, static detection
   edges      <file> [--begin T] [--end T] [--filter K1,K2]   1-bit edge detection with frequency estimation
-  snapshot   <file> --at T [--filter K1,K2]        All signal values at a given time point
+  snapshot   <file> --at T [--filter K1,K2]        Known signal values at a given time point
   compare    <file> --at T1,T2 [--filter K1,K2]    Diff signal values between two time points
-  search     <file> --value V [--signal K] [--begin T] [--end T] [--filter K1,K2]   Find when signal equals a value
+  search     <file> --value V [--signal K] [--begin T] [--end T] [--filter K1,K2]   Find intervals where signal state equals a value
 
 Global option:
   --json    Output structured JSON instead of text (for programmatic parsing)

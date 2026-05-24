@@ -13,13 +13,13 @@ FIX_HANDSHAKE = ROOT / "tests" / "fixtures" / "handshake_trace.vcd"
 FIX_BUS_RANGE = ROOT / "tests" / "fixtures" / "bus_range_trace.vcd"
 FIX_ESCAPED = ROOT / "tests" / "fixtures" / "escaped_trace.vcd"
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 LEGACY_SEARCH = True
 SUPPORTS_EDGES = True
 SUPPORTS_HANDSHAKE = False
 SEARCH_T0_MAY_COUNT = False
 SUPPORTS_LIMIT_VERBOSE = False
-DUMP_JSON_SUPPORTED = False
+DUMP_JSON_SUPPORTED = True
 SUPPORTS_GLOB_LITE = False
 SUPPORTS_SCOPE_FIX = False
 

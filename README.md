@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.1.1`
+        Version `1.1.2`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Tighten cleanup for split and multiline data tokens.
-- Stabilize parsing around malformed or oddly wrapped value-change text.
-- Refresh the test expectations while keeping the same public command set.
+        - Polish header and event parsing without changing the CLI contract.
+- Improve robustness around mixed declaration formatting and data replay.
+- Carry the existing smoke fixtures forward unchanged.
 
         ## Commands
 
@@ -52,7 +52,10 @@ Argument formats:
   --begin T       Start time with optional unit suffix: 0, 100ns, 17.5us, 1ms, 500ps, 200fs
   --end T         End time, same format as --begin. Omit for no upper bound
   --at T          Time point for snapshot. For compare: two points comma-separated: --at 17.5us,17.7us
-  --value V       Target value for search: decimal (42), hex (0x2a), or binary (101010)
+  --value V       Target value for search: decimal (42), hex (0x2a),
+                  or binary with explicit prefix (0b101010 or b101010).
+                  Leading-zero forms like "0010" parse as decimal 10;
+                  use "0b0010" to mean binary 2.
   --signal K      Additional keyword filter for search, targets signal name specifically
 
 Examples:

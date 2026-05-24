@@ -23,7 +23,10 @@ Argument formats:
   --begin T       Start time with optional unit suffix: 0, 100ns, 17.5us, 1ms, 500ps, 200fs
   --end T         End time, same format as --begin. Omit for no upper bound
   --at T          Time point for snapshot. For compare: two points comma-separated: --at 17.5us,17.7us
-  --value V       Target value for search: decimal (42), hex (0x2a), or binary (101010)
+  --value V       Target value for search: decimal (42), hex (0x2a),
+                  or binary with explicit prefix (0b101010 or b101010).
+                  Leading-zero forms like "0010" parse as decimal 10;
+                  use "0b0010" to mean binary 2.
   --signal K      Additional keyword filter for search, targets signal name specifically
 
 Examples:
@@ -39,7 +42,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.1.1'
+__version__ = '1.1.2'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -517,6 +520,20 @@ def cmd_dump(vcd, args):
     t0 = parse_time(args.begin, ts) if args.begin else 0
     t1 = parse_time(args.end, ts) if args.end else None
     sids = vcd.match(args.filter)
+    if args.json:
+        # Flat event list; one record per value change. Easier to filter/map
+        # in downstream tools (jq, agent code) than nested-by-timestamp form.
+        events = []
+        for t, sid, val in vcd.iter_events(t0, t1, sids):
+            info = vcd.signals[sid]
+            events.append({
+                'time': t,
+                'time_h': fmt_time(t, ts),
+                'path': info['path'],
+                'value': fmt_val(val, info),
+            })
+        print(json.dumps(events, indent=2, ensure_ascii=False))
+        return
     cur_t, count = None, 0
     for t, sid, val in vcd.iter_events(t0, t1, sids):
         if t != cur_t:
@@ -603,7 +620,10 @@ def cmd_edges(vcd, args):
         if len(rise_t) >= 2:
             intervals = [rise_t[i+1] - rise_t[i] for i in range(min(len(rise_t)-1, 50))]
             avg = sum(intervals) / len(intervals)
-            period = fmt_time(int(avg), ts)
+            # Pass float directly; fmt_time handles non-integer ticks. Avoids
+            # period/freq inconsistency on jittery clocks (e.g. avg=2.5ns
+            # would otherwise display T=2ns alongside f=400MHz).
+            period = fmt_time(avg, ts)
             ps = avg * ts
             if ps > 0:
                 hz = 1.0 / ps
@@ -696,16 +716,34 @@ def cmd_search(vcd, args):
     flt = [args.signal] if args.signal else args.filter
     sids = vcd.match(flt)
     target = args.value.lower().strip()
+    # Parse target once. Per VCD value-shortening rules (Table 18-2), the
+    # raw stored bits may be shorter than the user's typed full-width form
+    # (e.g. user types '0010' for a 4-bit signal whose VCD raw is '10'),
+    # so direct string compare fails. Numeric compare bridges this gap.
+    # Supported prefixes:
+    #   0x... / 0X...  hex
+    #   0b... / b...   binary (avoids ambiguity with leading-zero decimals
+    #                  like '0010' which Python int() treats as decimal 10)
+    #   no prefix      decimal (kept for backward compat)
+    target_int = None
+    try:
+        if target.startswith(('0x', '0X')):
+            target_int = int(target, 16)
+        elif target.startswith('0b'):
+            target_int = int(target[2:], 2)
+        elif target.startswith('b'):
+            target_int = int(target[1:], 2)
+        else:
+            target_int = int(target)
+    except ValueError:
+        pass
     matches = []
     for t, sid, val in vcd.iter_events(t0, t1, sids):
         hit = (val == target)
-        if not hit:
+        if not hit and target_int is not None:
             iv = val_to_int(val)
-            if iv is not None:
-                try:
-                    hit = iv == (int(target, 16) if target.startswith('0x') else int(target))
-                except ValueError:
-                    pass
+            if iv is not None and iv == target_int:
+                hit = True
         if hit:
             info = vcd.signals[sid]
             matches.append({'time': fmt_time(t, ts), 'path': info['path'],

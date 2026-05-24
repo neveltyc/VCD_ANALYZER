@@ -39,7 +39,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.1.0'
+__version__ = '1.1.1'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -85,11 +85,18 @@ def parse_time(s, ts_sec):
 
 
 def fmt_time(ts, ts_sec):
-    """Format internal timestamp to human-readable string."""
+    """Format internal timestamp to human-readable string.
+
+    Picks the smallest unit u where |scaled| < 1000, preferring natural
+    boundaries. E.g. with timescale 1ns, #5 prints as '5ns' not '5000ps';
+    #17534700 prints as '17.5347us'.
+    """
+    if ts == 0:
+        return '0s'
     sec = ts * ts_sec
     for u in ('fs', 'ps', 'ns', 'us', 'ms', 's'):
         scaled = sec / _UNITS[u]
-        if 0.1 <= abs(scaled) < 10000 or u == 's':
+        if abs(scaled) < 1000 or u == 's':
             return '{:g}{}'.format(scaled, u)
     return '{:g}s'.format(sec)
 
@@ -145,11 +152,16 @@ def val_to_int(value):
 _DECL_KEYWORDS = {'$timescale', '$scope', '$upscope', '$var',
                   '$comment', '$date', '$version', '$enddefinitions'}
 
-# IEEE 1364-2005 18.2.3 simulation keywords that wrap value_changes until $end.
-# These don't change the meaning of the wrapped value_changes; they're just
-# block markers. We skip the keyword and $end, and parse the body as normal
-# value changes (whether on the same line or following lines).
-_SIM_KEYWORDS = {'$dumpall', '$dumpoff', '$dumpon', '$dumpvars'}
+# Simulation keywords that wrap value_changes until $end. The keyword and $end
+# are pure markers — the wrapped value_changes are parsed normally.
+# Four-state VCD (18.2.3.9-12) + extended VCD (18.4.1 BNF).
+_SIM_KEYWORDS = {'$dumpall', '$dumpoff', '$dumpon', '$dumpvars',
+                 '$dumpports', '$dumpportsoff', '$dumpportson', '$dumpportsall'}
+
+# Sections that can appear in the data area whose body is NOT value_changes
+# and must be skipped wholesale until $end. $comment (18.2.3.1) is in both
+# header and data; $vcdclose (18.3.6.1) wraps a final simulation time token.
+_DATA_SKIP_SECTIONS = {'$comment', '$vcdclose'}
 
 
 class VCDParser:
@@ -159,6 +171,11 @@ class VCDParser:
 
     Auto-reassembles bit-exploded signals (QuestaSim writes 512-bit signals
     as 512 individual 1-bit $var entries with [N] suffix).
+
+    Extended VCD ($dumpports) support level: port_state characters are
+    lowered to 4-state values (0/1/x/z) for RTL debug. The strength0 and
+    strength1 components are parsed but discarded — preserving them would
+    rarely benefit RTL-level analysis and clutters the value display.
     """
 
     def __init__(self, path):
@@ -300,6 +317,22 @@ class VCDParser:
                 for t in line.split():
                     yield t
 
+    def _data_tokens_clean(self):
+        """Data section tokens with $comment/$vcdclose bodies skipped.
+
+        Per IEEE 1364-2005 18.2.3.1 and 18.3.6.1, these sections appear in
+        the data area but their content is NOT value_changes; the body must
+        not be interpreted as timestamps or value tokens.
+        """
+        toks = self._data_tokens()
+        for tok in toks:
+            if tok in _DATA_SKIP_SECTIONS:
+                for t in toks:
+                    if t == '$end':
+                        break
+                continue
+            yield tok
+
     def iter_events(self, t0=0, t1=None, sids=None):
         """Yield (time, sig_id, value_str) with bit reassembly.
 
@@ -318,19 +351,13 @@ class VCDParser:
             pending.clear()
             return items
 
-        toks = self._data_tokens()
+        toks = self._data_tokens_clean()
         for tok in toks:
             # Section markers: simulation keywords and $end are no-ops.
-            # Their semantics ($dumpoff makes all values X, $dumpon restores)
-            # are honored by the value_changes the simulator places inside
-            # the block — we just need to parse those value_changes.
+            # Their wrapped value_changes are parsed normally below.
+            # $comment and $vcdclose bodies are already filtered out by
+            # _data_tokens_clean.
             if tok in _SIM_KEYWORDS or tok == '$end':
-                continue
-            if tok == '$comment':
-                # 18.2.3.1: $comment ... $end can appear in data section
-                for t in toks:
-                    if t == '$end':
-                        break
                 continue
             if tok.startswith('$'):
                 continue  # unknown $keyword, skip
@@ -402,10 +429,11 @@ class VCDParser:
 
     def scan_time_range(self):
         """Min/max timestamps in the file. If any value_change occurs before
-        the first #T (an initial $dumpvars block), t_min is 0."""
+        the first #T (an initial $dumpvars block), t_min is 0.
+        $comment and $vcdclose bodies are skipped (18.2.3.1, 18.3.6.1)."""
         t_min = t_max = None
         saw_initial_data = False
-        for tok in self._data_tokens():
+        for tok in self._data_tokens_clean():
             if tok.startswith('#') and len(tok) > 1 and tok[1].isdigit():
                 try:
                     t = int(tok[1:])

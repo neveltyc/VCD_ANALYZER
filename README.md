@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.1.0`
+        Version `1.1.1`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Remove the specialized handshake command from the CLI surface.
-- Rework data-section token handling around a dedicated token generator.
-- Keep the legacy value-search workflow and edge analysis in place.
+        - Tighten cleanup for split and multiline data tokens.
+- Stabilize parsing around malformed or oddly wrapped value-change text.
+- Refresh the test expectations while keeping the same public command set.
 
         ## Commands
 

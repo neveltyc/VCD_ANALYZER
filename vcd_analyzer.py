@@ -8,18 +8,20 @@ Commands:
   list       <file> [--filter K1,K2]               List signals with path and bit width
   dump       <file> [--begin T] [--end T] [--filter K1,K2]   Print signal value changes in time order
   summary    <file> [--begin T] [--end T] [--filter K1,K2]   Per-signal stats: change count, unique values, static detection
-  edges      <file> [--begin T] [--end T] [--filter K1,K2]   1-bit edge detection with frequency estimation
   snapshot   <file> --at T [--filter K1,K2]        Known signal values at a given time point
   compare    <file> --at T1,T2 [--filter K1,K2]    Diff signal values between two time points
   search     <file> --value V [--signal K] [--begin T] [--end T] [--filter K1,K2]   Find intervals where signal state equals a value
 
-Global option:
-  --json    Output structured JSON instead of text (for programmatic parsing)
+Global options:
+  --json       Output compact structured JSON instead of text
+  --limit N    Max rows/records to output; default 200; 0 = unlimited
+  --verbose    Show extra fields; if --limit is omitted, disables truncation
 
 Argument formats:
   <file>          VCD file path
-  --filter K1,K2  Comma-separated keywords, substring-matched against signal paths (case-insensitive)
-                  e.g. --filter clk,rst   --filter tdata,tvalid   --filter u_dll_ctrl
+  --filter K1,K2  Comma-separated patterns. Plain text uses case-insensitive substring match;
+                  patterns containing *, ?, or [ use case-insensitive glob match.
+                  e.g. --filter clk,rst   --filter '*_valid,*_ready,*_data'   --filter 'top.u_dma.*'
   --begin T       Start time with optional unit suffix: 0, 100ns, 17.5us, 1ms, 500ps, 200fs
   --end T         End time, same format as --begin. Omit for no upper bound
   --at T          Time point for snapshot. For compare: two points comma-separated: --at 17.5us,17.7us
@@ -34,7 +36,6 @@ Examples:
   vcd_analyzer list sim.vcd --filter tdata,tvalid,tready
   vcd_analyzer dump sim.vcd --begin 17.5us --end 17.6us --filter clk,rst,state
   vcd_analyzer summary sim.vcd --filter dll_st,locked
-  vcd_analyzer edges sim.vcd --filter clk_500M
   vcd_analyzer snapshot sim.vcd --at 17.55us --filter init_done,state
   vcd_analyzer compare sim.vcd --at 17.535us,17.56us --filter init_done,link_active,state
   vcd_analyzer search sim.vcd --signal state --value 5
@@ -42,7 +43,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.1.8'
+__version__ = '1.2.0'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -50,6 +51,7 @@ import os
 import re
 import json
 import argparse
+import fnmatch
 from collections import defaultdict
 
 # -- Time utilities ----------------------------------------------------------
@@ -267,30 +269,42 @@ class VCDParser:
                                 scope.pop()
                         elif current_kw == '$var' and len(body) >= 4:
                             vtype = body[0]
-                            try:
-                                w = int(body[1])
-                            except ValueError:
-                                m = re.match(r'\[(\d+):(\d+)\]', body[1])
-                                if m:
-                                    w = abs(int(m.group(1)) - int(m.group(2))) + 1
-                                else:
+
+                            def _collect_bracket(tokens, i):
+                                if i >= len(tokens) or not tokens[i].startswith('['):
+                                    return None, i
+                                parts = []
+                                while i < len(tokens):
+                                    parts.append(tokens[i])
+                                    if ']' in tokens[i]:
+                                        return ''.join(parts), i + 1
+                                    i += 1
+                                return None, i
+
+                            size_expr, idx_after_size = _collect_bracket(body, 1)
+                            if size_expr is not None:
+                                m = re.match(r'\[(\d+):(\d+)\]$', size_expr)
+                                if not m:
                                     current_kw = None
                                     continue
-                            sym, name = body[2], body[3]
+                                w = abs(int(m.group(1)) - int(m.group(2))) + 1
+                                idx = idx_after_size
+                            else:
+                                try:
+                                    w = int(body[1])
+                                except ValueError:
+                                    current_kw = None
+                                    continue
+                                idx = 2
+                            if len(body) <= idx + 1:
+                                current_kw = None
+                                continue
+                            sym, name = body[idx], body[idx + 1]
+
                             # Per IEEE 1364 free-format, the bracket reference
                             # range can be split into several tokens, e.g.
                             # 'data [7 : 0]' → ['data', '[7', ':', '0]'].
-                            # Collect tokens from body[4] until one ends with
-                            # ']' and join (split() already dropped whitespace).
-                            bit_str = None
-                            if len(body) > 4 and body[4].startswith('['):
-                                parts = []
-                                for t in body[4:]:
-                                    parts.append(t)
-                                    if ']' in t:
-                                        break
-                                if parts and ']' in parts[-1]:
-                                    bit_str = ''.join(parts)
+                            bit_str, _idx_after_ref = _collect_bracket(body, idx + 2)
                             # Per IEEE 1364-2005 18.2.3.7 reference syntax:
                             #   identifier [bit_select_index]      → single bit
                             #   identifier [msb_index : lsb_index] → range
@@ -394,19 +408,29 @@ class VCDParser:
             self.raw_type_counts[vtype] += 1
 
     def match(self, keywords):
-        """Return set of sig_ids matching any keyword, or None for all.
+        """Return set of sig_ids matching any pattern, or None for all.
 
-        Matches against any aliased path of a signal.
+        Plain patterns use case-insensitive substring matching. Patterns
+        containing shell glob metacharacters (*, ?, [) use fnmatch-style
+        matching, also case-insensitive. Matching checks every aliased path.
         """
         if not keywords:
             return None
-        kws = [k.lower() for k in keywords]
+        pats = [k.lower() for k in keywords if k]
         out = set()
         for sid, info in self.signals.items():
             for path in info['aliases']:
                 pl = path.lower()
-                if any(k in pl for k in kws):
-                    out.add(sid)
+                hit = False
+                for pat in pats:
+                    if any(ch in pat for ch in '*?['):
+                        hit = fnmatch.fnmatchcase(pl, pat)
+                    else:
+                        hit = pat in pl
+                    if hit:
+                        out.add(sid)
+                        break
+                if hit:
                     break
         return out
 
@@ -683,243 +707,36 @@ class VCDParser:
         return t_min, t_max
 
 
+
 # -- Subcommands -------------------------------------------------------------
 
-def cmd_info(vcd, args):
-    t_min, t_max = vcd.scan_time_range()
-    ts = vcd.ts_sec
-    # Counts come from the raw $var declarations (transparent to spec)
-    # rather than post-reassembly aliases. A 512-bit bit-exploded bus
-    # contributes 512 wire declarations to var_types, not 1, so agents
-    # can see actual file size. signal_count remains the post-reassembly
-    # count (what the downstream commands operate on).
-    synth = [s for s in vcd.signals.values() if s.get('synthesized')]
-    r = {
-        'file': vcd.path,
-        'size_bytes': os.path.getsize(vcd.path),
-        'timescale': vcd.ts_str.replace('$timescale', '').replace('$end', '').strip(),
-        'signal_count': len(vcd.signals),       # post-reassembly
-        'reference_count': vcd.raw_var_count,   # raw $var declarations
-        'synthesized_buses': len(synth),        # reassembled bit-bus groups
-        'var_types': dict(sorted(vcd.raw_type_counts.items(), key=lambda x: -x[1])),
-        'time_min': fmt_time(t_min, ts) if t_min is not None else None,
-        'time_max': fmt_time(t_max, ts) if t_max is not None else None,
-        'duration': fmt_time(t_max - t_min, ts) if t_min is not None and t_max is not None else None,
-        'scopes': sorted(set(
-            '.'.join(v['path'].split('.')[:-1]) for v in vcd.signals.values() if '.' in v['path']
-        )),
-    }
-    if args.json:
-        print(json.dumps(r, indent=2, ensure_ascii=False))
-    else:
-        print('File      : {}'.format(r['file']))
-        print('Size      : {:,} bytes'.format(r['size_bytes']))
-        print('Timescale : {}'.format(r['timescale']))
-        if r['signal_count'] == r['reference_count']:
-            print('Signals   : {}'.format(r['signal_count']))
-        elif r['synthesized_buses']:
-            print('Signals   : {} ({} $var decls, {} reassembled as bit-buses)'.format(
-                r['signal_count'], r['reference_count'], r['synthesized_buses']))
-        else:
-            print('Signals   : {} unique ({} $var refs via aliases)'.format(
-                r['signal_count'], r['reference_count']))
-        print('Types     : {}'.format(', '.join('{}={}'.format(k, v) for k, v in r['var_types'].items())))
-        print('Time      : {} ~ {} ({})'.format(r['time_min'], r['time_max'], r['duration']))
-        for s in r['scopes']:
-            print('  scope: {}'.format(s))
+_DEFAULT_LIMIT = 200
 
 
-def cmd_list(vcd, args):
-    sids = vcd.match(args.filter)
-    entries = []
-    for sid, info in vcd.signals.items():
-        if sids is not None and sid not in sids:
-            continue
-        # Each aliased path appears as a separate row. Per IEEE 1364-2005
-        # 18.2.3.7, multiple paths can share one identifier_code.
-        vtype = info.get('type', 'wire')
-        for path in info['aliases']:
-            entries.append({'path': path, 'width': info['width'], 'type': vtype})
-    entries.sort(key=lambda e: e['path'])
-    if args.json:
-        print(json.dumps(entries, indent=2, ensure_ascii=False))
-    else:
-        for e in entries:
-            print('  {:<60} {:>5}  {}'.format(e['path'], e['width'], e['type']))
-        print('\nTotal: {}'.format(len(entries)))
+def _json(obj):
+    """Compact JSON for agent use."""
+    print(json.dumps(obj, ensure_ascii=False, separators=(',', ':')))
 
 
-def cmd_dump(vcd, args):
-    ts = vcd.ts_sec
-    t0 = parse_time(args.begin, ts) if args.begin else 0
-    t1 = parse_time(args.end, ts) if args.end else None
-    sids = vcd.match(args.filter)
-    if args.json:
-        # Flat event list; one record per value change. Easier to filter/map
-        # in downstream tools (jq, agent code) than nested-by-timestamp form.
-        events = []
-        for t, sid, val in vcd.iter_events(t0, t1, sids):
-            info = vcd.signals[sid]
-            events.append({
-                'time': t,
-                'time_h': fmt_time(t, ts),
-                'path': info['path'],
-                'value': fmt_val(val, info),
-            })
-        print(json.dumps(events, indent=2, ensure_ascii=False))
-        return
-    cur_t, count = None, 0
-    for t, sid, val in vcd.iter_events(t0, t1, sids):
-        if t != cur_t:
-            cur_t = t
-            print('\n[T={}] ({})'.format(t, fmt_time(t, ts)))
-        print('  {:<55} = {}'.format(vcd.signals[sid]['path'], fmt_val(val, vcd.signals[sid])))
-        count += 1
-    if count == 0:
-        print('(no changes in range)')
-    else:
-        print('\n{} changes'.format(count))
+def _limit(args, cmd):
+    """Resolve global output limit. --verbose disables truncation unless an
+    explicit --limit was supplied. --limit 0 always means unlimited."""
+    val = getattr(args, 'limit', None)
+    if val is None:
+        return 0 if getattr(args, 'verbose', False) else _DEFAULT_LIMIT
+    if val < 0:
+        raise _TimeParseError('limit must be non-negative; got {}'.format(val))
+    return val
 
 
-def cmd_summary(vcd, args):
-    ts = vcd.ts_sec
-    t0 = parse_time(args.begin, ts) if args.begin else 0
-    t1 = parse_time(args.end, ts) if args.end else None
-    if t1 is not None and t1 < t0:
-        raise _TimeParseError('end time must be >= begin time')
-    sids = _selected_sids(vcd, vcd.match(args.filter))
+def _clip(seq, limit):
+    if limit == 0:
+        return seq, False
+    return seq[:limit], len(seq) > limit
 
-    initial = _build_snapshot(vcd, t0, sids)
-    stats = {}
-    for sid, val in initial.items():
-        stats[sid] = {
-            'changes': 0, 'first_at': None, 'last_at': t0,
-            'initial': val, 'last': val, 'unique': {val}
-        }
 
-    for t, sid, val in vcd.iter_events(t0, t1, sids):
-        if sid not in stats:
-            stats[sid] = {
-                'changes': 0, 'first_at': None, 'last_at': t,
-                'initial': None, 'last': None, 'unique': set()
-            }
-        s = stats[sid]
-        s['changes'] += 1
-        if s['first_at'] is None:
-            s['first_at'] = t
-        s['last_at'] = t
-        s['last'] = val
-        s['unique'].add(val)
-
-    rows = []
-    for sid in sorted(stats, key=lambda s: vcd.signals[s]['path']):
-        info, s = vcd.signals[sid], stats[sid]
-        cat = 'static' if s['changes'] == 0 and s['initial'] is not None else 'active'
-        rows.append({
-            'path': info['path'], 'width': info['width'], 'category': cat,
-            'changes': s['changes'], 'unique': len(s['unique']),
-            'initial_val': fmt_val(s['initial'], info) if s['initial'] is not None else '(undef)',
-            'last_val': fmt_val(s['last'], info) if s['last'] is not None else '(undef)',
-            'first_change_at': fmt_time(s['first_at'], ts) if s['first_at'] is not None else None,
-            'last_change_at': fmt_time(s['last_at'], ts) if s['changes'] else None,
-        })
-
-    active = [r for r in rows if r['category'] == 'active']
-    static = [r for r in rows if r['category'] == 'static']
-    limit = max(0, getattr(args, 'limit', 50))
-
-    if args.json:
-        clipped = rows if limit == 0 else rows[:limit]
-        print(json.dumps({
-            'begin': fmt_time(t0, ts),
-            'end': fmt_time(t1, ts) if t1 is not None else None,
-            'total': len(rows), 'active': len(active), 'static': len(static),
-            'truncated': limit != 0 and len(rows) > limit,
-            'rows': clipped,
-        }, indent=2, ensure_ascii=False))
-    else:
-        print('Summary: {} known signals ({} active, {} static)'.format(
-            len(rows), len(active), len(static)))
-        if active:
-            print('\nActive ({}):{}'.format(
-                len(active), ' [showing first {}]'.format(limit) if limit and len(active) > limit else ''))
-            for r in (active if limit == 0 else active[:limit]):
-                print('  {:<45} w={:<4} chg={:<6} uniq={:<4} init={} last={}'.format(
-                    r['path'], r['width'], r['changes'], r['unique'],
-                    r['initial_val'], r['last_val']))
-        if static:
-            s_limit = limit if limit else len(static)
-            print('\nStatic known ({}):{}'.format(
-                len(static), ' [showing first {}]'.format(s_limit) if len(static) > s_limit else ''))
-            for r in static[:s_limit]:
-                print('  {:<55} = {}'.format(r['path'], r['last_val']))
-        if not rows:
-            print('(no known values in the selected time range)')
-
-def cmd_edges(vcd, args):
-    ts = vcd.ts_sec
-    t0 = parse_time(args.begin, ts) if args.begin else 0
-    t1 = parse_time(args.end, ts) if args.end else None
-    sids = vcd.match(args.filter)
-    prev = {}
-    # Pre-window state replay: standalone 1-bit signals need their last
-    # value before t0 known, otherwise the first transition inside the
-    # window can't be classified as rise vs fall (the first event has no
-    # 'prev' to compare against). iter_events already maintains bit_state
-    # for bit-exploded signals during catch-up; we do the same for
-    # standalones here. Only runs when t0 > 0; cost is one extra header-to-t0
-    # scan, amortized across edge counting.
-    if t0 > 0:
-        for t, sid, val in vcd.iter_events(0, t0 - 1, sids):
-            if vcd.signals[sid]['width'] == 1:
-                prev[sid] = val
-    edges = defaultdict(list)  # sid -> [(time, 'rise'|'fall')]
-    for t, sid, val in vcd.iter_events(t0, t1, sids):
-        if vcd.signals[sid]['width'] != 1:
-            continue
-        if sid in prev:
-            if prev[sid] == '0' and val == '1':
-                edges[sid].append((t, 'rise'))
-            elif prev[sid] == '1' and val == '0':
-                edges[sid].append((t, 'fall'))
-        prev[sid] = val
-
-    results = []
-    for sid in sorted(edges, key=lambda s: vcd.signals[s]['path']):
-        el = edges[sid]
-        rise_t = [t for t, e in el if e == 'rise']
-        period, freq = None, None
-        if len(rise_t) >= 2:
-            intervals = [rise_t[i+1] - rise_t[i] for i in range(min(len(rise_t)-1, 50))]
-            avg = sum(intervals) / len(intervals)
-            # Pass float directly; fmt_time handles non-integer ticks. Avoids
-            # period/freq inconsistency on jittery clocks (e.g. avg=2.5ns
-            # would otherwise display T=2ns alongside f=400MHz).
-            period = fmt_time(avg, ts)
-            ps = avg * ts
-            if ps > 0:
-                hz = 1.0 / ps
-                freq = '{:.2f} GHz'.format(hz/1e9) if hz >= 1e9 else \
-                       '{:.2f} MHz'.format(hz/1e6) if hz >= 1e6 else \
-                       '{:.2f} KHz'.format(hz/1e3) if hz >= 1e3 else \
-                       '{:.2f} Hz'.format(hz)
-        r = {'path': vcd.signals[sid]['path'],
-             'rise': sum(1 for _, e in el if e == 'rise'),
-             'fall': sum(1 for _, e in el if e == 'fall')}
-        if period:
-            r['period'] = period
-            r['freq'] = freq
-        results.append(r)
-
-    if args.json:
-        print(json.dumps(results, indent=2, ensure_ascii=False))
-    else:
-        for r in results:
-            line = '  {:<50} rise={} fall={}'.format(r['path'], r['rise'], r['fall'])
-            if 'period' in r:
-                line += '  T={} f={}'.format(r['period'], r['freq'])
-            print(line)
-
+def _trunc_line(shown, total, noun):
+    return '... truncated: {}/{} {} shown.'.format(shown, total, noun)
 
 
 def _selected_sids(vcd, sids):
@@ -927,10 +744,14 @@ def _selected_sids(vcd, sids):
     return set(vcd.signals.keys()) if sids is None else set(sids)
 
 
+def _fmt_maybe(value, info):
+    return fmt_val(value, info) if value is not None else '(undef)'
+
+
 def _build_snapshot(vcd, t_at, sids=None):
     """Replay from start to t_at, return known {sig_id: value} only."""
     state = {}
-    for t, sid, val in vcd.iter_events(0, t_at, sids):
+    for _t, sid, val in vcd.iter_events(0, t_at, sids):
         state[sid] = val
     return state
 
@@ -963,46 +784,329 @@ def _value_matches(value, target_raw, target_int):
     return iv is not None and iv == target_int
 
 
+def _event_groups(vcd, t0, t1, sids):
+    """Yield (time, [(sid, val), ...]) groups in time order."""
+    cur_t = None
+    group = []
+    for t, sid, val in vcd.iter_events(t0, t1, sids):
+        if cur_t is None:
+            cur_t = t
+        if t != cur_t:
+            yield cur_t, group
+            cur_t, group = t, []
+        group.append((sid, val))
+    if cur_t is not None:
+        yield cur_t, group
+
+
 def _signal_value_intervals(vcd, t0, t1, sids):
     """Yield stable known-value intervals per selected signal.
 
-    Each item is (sid, start_t, end_t, value). Unknown time before a signal's
-    first observed value is omitted rather than guessed as x/undef.
+    Each item is (sid, start_t, end_t, value, since_t). Unknown time before a
+    signal's first observed value is omitted rather than guessed as x/undef.
     """
-    state = _build_snapshot(vcd, t0, sids)
-    start = {sid: t0 for sid in state}
-    for t, sid, val in vcd.iter_events(t0, t1, sids):
-        if t <= t0:
-            continue
-        if sid in state:
-            yield sid, start[sid], t, state[sid]
-        state[sid] = val
-        start[sid] = t
     end_t = t1
     if end_t is None:
         _mn, mx = vcd.scan_time_range()
         end_t = mx if mx is not None else t0
+
+    state = _build_snapshot(vcd, t0, sids)
+    start = {sid: t0 for sid in state}
+    since = {sid: None for sid in state}
+    # Search/dump at t0 treat the state at t0 as the known starting state.
+    for t, group in _event_groups(vcd, t0, end_t, sids):
+        if t <= t0:
+            continue
+        for sid, val in group:
+            if sid in state and start[sid] < t:
+                yield sid, start[sid], t, state[sid], since.get(sid)
+            state[sid] = val
+            start[sid] = t
+            since[sid] = t
     for sid, val in state.items():
-        yield sid, start[sid], end_t, val
+        if start[sid] <= end_t:
+            yield sid, start[sid], end_t, val, since.get(sid)
+
+
+def _summary_rows(vcd, t0, t1, sids):
+    """Return (rows, counts) for window summary.
+
+    Static means known at t0 and no value changes after t0 inside the window.
+    Undefined means selected but not known at t0 and no value changes inside
+    the window. No unknown values are invented.
+    """
+    selected = _selected_sids(vcd, sids)
+    initial = _build_snapshot(vcd, t0, selected)
+    stats = {}
+    for sid, val in initial.items():
+        stats[sid] = {
+            'changes': 0, 'first_at': None, 'last_at': None,
+            'initial': val, 'last': val, 'unique': {val}
+        }
+    for t, group in _event_groups(vcd, t0, t1, selected):
+        if t <= t0:
+            continue
+        for sid, val in group:
+            if sid not in stats:
+                stats[sid] = {
+                    'changes': 0, 'first_at': None, 'last_at': None,
+                    'initial': None, 'last': None, 'unique': set()
+                }
+            s = stats[sid]
+            s['changes'] += 1
+            if s['first_at'] is None:
+                s['first_at'] = t
+            s['last_at'] = t
+            s['last'] = val
+            s['unique'].add(val)
+
+    rows = []
+    for sid in sorted(stats, key=lambda x: vcd.signals[x]['path']):
+        info = vcd.signals[sid]
+        s = stats[sid]
+        kind = 'active' if s['changes'] else 'static'
+        row = {
+            'kind': kind,
+            'path': info['path'],
+            'value': fmt_val(s['last'], info) if kind == 'static' else None,
+            'changes': s['changes'],
+            'init': _fmt_maybe(s['initial'], info),
+            'last': _fmt_maybe(s['last'], info),
+        }
+        if s['first_at'] is not None:
+            row['first_at'] = fmt_time(s['first_at'], vcd.ts_sec)
+            row['last_at'] = fmt_time(s['last_at'], vcd.ts_sec)
+        if s['unique']:
+            row['unique'] = len(s['unique'])
+        row['_width'] = info['width']
+        row['_type'] = info.get('type', 'wire')
+        rows.append(row)
+
+    undefined = sorted(selected - set(stats), key=lambda x: vcd.signals[x]['path'])
+    counts = {
+        'selected': len(selected), 'defined': len(stats), 'undefined': len(undefined),
+        'active': sum(1 for r in rows if r['kind'] == 'active'),
+        'static': sum(1 for r in rows if r['kind'] == 'static'),
+    }
+    return rows, undefined, counts
+
+
+def _public_row(row, verbose=False):
+    r = dict(row)
+    width = r.pop('_width', None)
+    typ = r.pop('_type', None)
+    if verbose:
+        r['width'] = width
+        r['type'] = typ
+    return r
+
+
+def cmd_info(vcd, args):
+    t_min, t_max = vcd.scan_time_range()
+    ts = vcd.ts_sec
+    synth = [s for s in vcd.signals.values() if s.get('synthesized')]
+    r = {
+        'file': vcd.path,
+        'size_bytes': os.path.getsize(vcd.path),
+        'timescale': vcd.ts_str.replace('$timescale', '').replace('$end', '').strip(),
+        'signal_count': len(vcd.signals),
+        'reference_count': vcd.raw_var_count,
+        'synthesized_buses': len(synth),
+        'var_types': dict(sorted(vcd.raw_type_counts.items(), key=lambda x: -x[1])),
+        'time_min': fmt_time(t_min, ts) if t_min is not None else None,
+        'time_max': fmt_time(t_max, ts) if t_max is not None else None,
+        'duration': fmt_time(t_max - t_min, ts) if t_min is not None and t_max is not None else None,
+        'scopes': sorted(set(
+            '.'.join(v['path'].split('.')[:-1]) for v in vcd.signals.values() if '.' in v['path']
+        )),
+    }
+    if args.json:
+        _json(r)
+    else:
+        print('File      : {}'.format(r['file']))
+        print('Size      : {:,} bytes'.format(r['size_bytes']))
+        print('Timescale : {}'.format(r['timescale']))
+        if r['signal_count'] == r['reference_count']:
+            print('Signals   : {}'.format(r['signal_count']))
+        elif r['synthesized_buses']:
+            print('Signals   : {} ({} $var decls, {} reassembled as bit-buses)'.format(
+                r['signal_count'], r['reference_count'], r['synthesized_buses']))
+        else:
+            print('Signals   : {} unique ({} $var refs via aliases)'.format(
+                r['signal_count'], r['reference_count']))
+        print('Types     : {}'.format(', '.join('{}={}'.format(k, v) for k, v in r['var_types'].items())))
+        print('Time      : {} ~ {} ({})'.format(r['time_min'], r['time_max'], r['duration']))
+        for s in r['scopes']:
+            print('  scope: {}'.format(s))
+
+
+def cmd_list(vcd, args):
+    limit = _limit(args, 'list')
+    sids = vcd.match(args.filter)
+    entries = []
+    for sid, info in vcd.signals.items():
+        if sids is not None and sid not in sids:
+            continue
+        vtype = info.get('type', 'wire')
+        for path in info['aliases']:
+            e = {'path': path, 'width': info['width'], 'type': vtype}
+            if getattr(args, 'verbose', False):
+                e['id'] = sid
+                if info.get('synthesized'):
+                    e['synthesized'] = True
+                    e['raw_bits'] = info.get('raw_bits')
+            entries.append(e)
+    entries.sort(key=lambda e: e['path'])
+    shown, trunc = _clip(entries, limit)
+    if args.json:
+        _json({'total': len(entries), 'shown': len(shown), 'truncated': trunc, 'signals': shown})
+    else:
+        print('Matched: {}/{}'.format(len(entries), len(vcd.signals)))
+        for e in shown:
+            print('  {:<60} {:>5}  {}'.format(e['path'], e['width'], e['type']))
+        if trunc:
+            print(_trunc_line(len(shown), len(entries), 'signals'))
+
+
+def cmd_dump(vcd, args):
+    ts = vcd.ts_sec
+    t0 = parse_time(args.begin, ts) if args.begin else 0
+    t1 = parse_time(args.end, ts) if args.end else None
+    if t1 is not None and t1 < t0:
+        raise _TimeParseError('end time must be >= begin time')
+    sids = vcd.match(args.filter)
+    limit = _limit(args, 'dump')
+    total = 0
+    events = []
+    for t, sid, val in vcd.iter_events(t0, t1, sids):
+        total += 1
+        if limit == 0 or len(events) < limit:
+            info = vcd.signals[sid]
+            e = {'time': t, 'time_h': fmt_time(t, ts), 'path': info['path'], 'value': fmt_val(val, info)}
+            if getattr(args, 'verbose', False):
+                e['width'] = info['width']
+                e['type'] = info.get('type', 'wire')
+            events.append(e)
+    trunc = limit != 0 and total > len(events)
+    if args.json:
+        _json({'total': total, 'shown': len(events), 'truncated': trunc, 'events': events})
+        return
+    if not events:
+        print('(no changes in range)')
+        return
+    cur = None
+    for e in events:
+        if e['time'] != cur:
+            cur = e['time']
+            print('T={}'.format(e['time_h']))
+        if getattr(args, 'verbose', False):
+            print('  {:<55} w={} {} = {}'.format(e['path'], e.get('width'), e.get('type'), e['value']))
+        else:
+            print('  {:<55} = {}'.format(e['path'], e['value']))
+    if trunc:
+        print(_trunc_line(len(events), total, 'events'))
+
+
+def cmd_summary(vcd, args):
+    ts = vcd.ts_sec
+    t0 = parse_time(args.begin, ts) if args.begin else 0
+    t1 = parse_time(args.end, ts) if args.end else None
+    if t1 is not None and t1 < t0:
+        raise _TimeParseError('end time must be >= begin time')
+    sids = vcd.match(args.filter)
+    selected = _selected_sids(vcd, sids)
+    rows, undef_sids, counts = _summary_rows(vcd, t0, t1, selected)
+    active = [r for r in rows if r['kind'] == 'active']
+    static = [r for r in rows if r['kind'] == 'static']
+    ordered = active + static
+    if getattr(args, 'verbose', False):
+        for sid in undef_sids:
+            info = vcd.signals[sid]
+            ordered.append({'kind': 'undefined', 'path': info['path'], 'value': None,
+                            'changes': 0, 'init': '(undef)', 'last': '(undef)',
+                            '_width': info['width'], '_type': info.get('type', 'wire')})
+    limit = _limit(args, 'summary')
+    shown, trunc = _clip(ordered, limit)
+    begin_h = fmt_time(t0, ts)
+    end_h = fmt_time(t1, ts) if t1 is not None else None
+    if args.json:
+        _json({'window': {'begin': begin_h, 'end': end_h}, **counts,
+               'shown': len(shown), 'truncated': trunc,
+               'rows': [_public_row(r, getattr(args, 'verbose', False)) for r in shown]})
+        return
+    print('Window: {}..{}'.format(begin_h, end_h if end_h is not None else '(end)'))
+    print('Selected: {}, Defined: {}, Undefined: {}'.format(
+        counts['selected'], counts['defined'], counts['undefined']))
+    print('Active: {}, Static: {}'.format(counts['active'], counts['static']))
+    current = None
+    for r in shown:
+        if r['kind'] != current:
+            current = r['kind']
+            print('\n{}'.format(current.upper()))
+        if r['kind'] == 'active':
+            if getattr(args, 'verbose', False):
+                print('  {:<45} w={} {} chg={} init={} last={} first@{} last@{} uniq={}'.format(
+                    r['path'], r['_width'], r['_type'], r['changes'], r['init'], r['last'],
+                    r.get('first_at', '-'), r.get('last_at', '-'), r.get('unique', 0)))
+            else:
+                print('  {:<45} chg={} init={} last={}'.format(
+                    r['path'], r['changes'], r['init'], r['last']))
+        elif r['kind'] == 'static':
+            if getattr(args, 'verbose', False):
+                print('  {:<45} w={} {} value={}'.format(r['path'], r['_width'], r['_type'], r['value']))
+            else:
+                print('  {:<45} value={}'.format(r['path'], r['value']))
+        else:
+            print('  {:<45} w={} {}'.format(r['path'], r['_width'], r['_type']))
+    if not rows and not undef_sids:
+        print('(no selected signals)')
+    if trunc:
+        print(_trunc_line(len(shown), len(ordered), 'rows'))
+
 
 def cmd_snapshot(vcd, args):
     ts = vcd.ts_sec
     t_at = parse_time(args.at, ts)
-    sids = vcd.match(args.filter)
-    state = _build_snapshot(vcd, t_at, sids)
+    sids0 = vcd.match(args.filter)
+    selected = _selected_sids(vcd, sids0)
+    state = _build_snapshot(vcd, t_at, selected)
     rows = []
     for sid in sorted(state, key=lambda s: vcd.signals[s]['path']):
         info = vcd.signals[sid]
-        rows.append({'path': info['path'], 'value': fmt_val(state[sid], info)})
+        r = {'path': info['path'], 'value': fmt_val(state[sid], info)}
+        if getattr(args, 'verbose', False):
+            r['width'] = info['width']
+            r['type'] = info.get('type', 'wire')
+        rows.append(r)
+    undef = sorted(selected - set(state), key=lambda s: vcd.signals[s]['path'])
+    if getattr(args, 'verbose', False):
+        for sid in undef:
+            info = vcd.signals[sid]
+            rows.append({'path': info['path'], 'value': None, 'undefined': True,
+                         'width': info['width'], 'type': info.get('type', 'wire')})
+    limit = _limit(args, 'snapshot')
+    shown, trunc = _clip(rows, limit)
     if args.json:
-        print(json.dumps({'at': fmt_time(t_at, ts), 'signals': rows}, indent=2, ensure_ascii=False))
+        _json({'at': fmt_time(t_at, ts), 'selected': len(selected), 'known': len(state),
+               'undefined': len(undef), 'shown': len(shown), 'truncated': trunc,
+               'signals': shown})
+        return
+    if not state:
+        print('No known values at {}.'.format(fmt_time(t_at, ts)))
     else:
         print('Known snapshot @ {}'.format(fmt_time(t_at, ts)))
-        for r in rows:
+    if getattr(args, 'verbose', False):
+        print('Selected: {}, Known: {}, Undefined: {}'.format(len(selected), len(state), len(undef)))
+    for r in shown:
+        if r.get('undefined'):
+            print('  {:<55} = (undef)'.format(r['path']))
+        elif getattr(args, 'verbose', False):
+            print('  {:<55} w={} {} = {}'.format(r['path'], r.get('width'), r.get('type'), r['value']))
+        else:
             print('  {:<55} = {}'.format(r['path'], r['value']))
-        print('\n{} known signals'.format(len(rows)))
-        if not rows:
-            print('(no known values at this time point)')
+    if trunc:
+        print(_trunc_line(len(shown), len(rows), 'signals'))
+
 
 def cmd_compare(vcd, args):
     ts = vcd.ts_sec
@@ -1011,31 +1115,33 @@ def cmd_compare(vcd, args):
         sys.exit('Error: --at needs two times separated by comma, e.g. --at 17.5us,17.7us')
     ta, tb = parse_time(parts[0].strip(), ts), parse_time(parts[1].strip(), ts)
     sids = vcd.match(args.filter)
-    # Build both snapshots independently from t=0 — avoids the
-    # directionality bug where --at T2,T1 (with T1<T2 already replayed)
-    # would silently report no diffs. Each snapshot is the true state at
-    # its query time regardless of ordering.
     sa = _build_snapshot(vcd, ta, sids)
     sb = _build_snapshot(vcd, tb, sids)
-
     diffs = []
     for sid in sorted(set(sa) | set(sb), key=lambda s: vcd.signals[s]['path']):
         va, vb = sa.get(sid), sb.get(sid)
         if va != vb:
             info = vcd.signals[sid]
-            diffs.append({
-                'path': info['path'],
-                'at_t1': fmt_val(va, info) if va else '(undef)',
-                'at_t2': fmt_val(vb, info) if vb else '(undef)',
-            })
+            d = {'path': info['path'],
+                 'at_t1': fmt_val(va, info) if va is not None else '(undef)',
+                 'at_t2': fmt_val(vb, info) if vb is not None else '(undef)'}
+            if getattr(args, 'verbose', False):
+                d['width'] = info['width']
+                d['type'] = info.get('type', 'wire')
+            diffs.append(d)
+    limit = _limit(args, 'compare')
+    shown, trunc = _clip(diffs, limit)
     if args.json:
-        print(json.dumps({'t1': fmt_time(ta, ts), 't2': fmt_time(tb, ts),
-                          'diffs': diffs}, indent=2, ensure_ascii=False))
+        _json({'t1': fmt_time(ta, ts), 't2': fmt_time(tb, ts),
+               'total': len(diffs), 'shown': len(shown), 'truncated': trunc,
+               'diffs': shown})
     else:
         print('Compare: {} vs {}'.format(fmt_time(ta, ts), fmt_time(tb, ts)))
         print('{} changed, {} unchanged'.format(len(diffs), len(set(sa) | set(sb)) - len(diffs)))
-        for d in diffs:
+        for d in shown:
             print('  {:<48} {} -> {}'.format(d['path'], d['at_t1'], d['at_t2']))
+        if trunc:
+            print(_trunc_line(len(shown), len(diffs), 'diffs'))
 
 
 def cmd_search(vcd, args):
@@ -1048,57 +1154,55 @@ def cmd_search(vcd, args):
         t1 = mx if mx is not None else t0
     if t1 < t0:
         raise _TimeParseError('end time must be >= begin time')
-
     flt = [args.signal] if args.signal else args.filter
-    sids0 = vcd.match(flt)
-    sids = _selected_sids(vcd, sids0)
-    if not sids:
+    selected = _selected_sids(vcd, vcd.match(flt))
+    if not selected:
         msg = 'No signals match the given filter'
         if args.json:
-            print(json.dumps({'begin': fmt_time(t0, ts), 'end': fmt_time(t1, ts),
-                              'total': 0, 'matches': [], 'message': msg},
-                             indent=2, ensure_ascii=False))
+            _json({'begin': fmt_time(t0, ts), 'end': fmt_time(t1, ts),
+                   'total': 0, 'shown': 0, 'truncated': False, 'matches': [], 'message': msg})
         else:
             print(msg)
         return
-
     target_raw, target_int = _parse_target_value(args.value)
     matches = []
-    known_sids = set()
-    for sid, a, b, val in _signal_value_intervals(vcd, t0, t1, sids):
-        known_sids.add(sid)
+    known = set()
+    for sid, a, b, val, since in _signal_value_intervals(vcd, t0, t1, selected):
+        known.add(sid)
         if _value_matches(val, target_raw, target_int):
             info = vcd.signals[sid]
-            matches.append({
-                'start': fmt_time(a, ts), 'end': fmt_time(b, ts),
-                'path': info['path'], 'value': fmt_val(val, info),
-            })
-
-    limit = max(0, getattr(args, 'limit', 200))
-    shown = matches if limit == 0 else matches[:limit]
+            m = {'begin': fmt_time(a, ts), 'end': fmt_time(b, ts),
+                 'path': info['path'], 'value': fmt_val(val, info)}
+            if getattr(args, 'verbose', False):
+                m['width'] = info['width']
+                m['type'] = info.get('type', 'wire')
+                m['since'] = fmt_time(since, ts) if since is not None else None
+            matches.append(m)
+    limit = _limit(args, 'search')
+    shown, trunc = _clip(matches, limit)
     if args.json:
-        print(json.dumps({
-            'begin': fmt_time(t0, ts), 'end': fmt_time(t1, ts),
-            'searched_signals': len(sids), 'defined_signals': len(known_sids),
-            'target': args.value, 'total': len(matches),
-            'truncated': limit != 0 and len(matches) > limit,
-            'matches': shown,
-        }, indent=2, ensure_ascii=False))
+        _json({'begin': fmt_time(t0, ts), 'end': fmt_time(t1, ts),
+               'searched_signals': len(selected), 'defined_signals': len(known),
+               'target': args.value, 'total': len(matches), 'shown': len(shown),
+               'truncated': trunc, 'matches': shown})
         return
-
     if matches:
-        print('Found {} interval(s) where value == "{}":'.format(len(matches), args.value))
+        print('Found: {} interval(s)'.format(len(matches)))
         for m in shown:
-            print('  {:<14} .. {:<14} {:<50} = {}'.format(
-                m['start'], m['end'], m['path'], m['value']))
-        if limit and len(matches) > limit:
-            print('  ... {} total'.format(len(matches)))
+            if getattr(args, 'verbose', False):
+                since = '' if m.get('since') is None else ' since={}'.format(m.get('since'))
+                print('  {:<12}..{:<12} {:<50} = {}{}'.format(
+                    m['begin'], m['end'], m['path'], m['value'], since))
+            else:
+                print('  {:<12}..{:<12} {:<50} = {}'.format(
+                    m['begin'], m['end'], m['path'], m['value']))
+        if trunc:
+            print(_trunc_line(len(shown), len(matches), 'intervals'))
     else:
-        if not known_sids:
-            print('No defined values in {}..{} for selected signals'.format(
-                fmt_time(t0, ts), fmt_time(t1, ts)))
+        if not known:
+            print('No defined value in {}..{} for selected signals.'.format(fmt_time(t0, ts), fmt_time(t1, ts)))
         else:
-            print('No interval in {}..{} where selected signals equal "{}"'.format(
+            print('No interval in {}..{} where selected signals equal "{}".'.format(
                 fmt_time(t0, ts), fmt_time(t1, ts), args.value))
 
 
@@ -1110,10 +1214,23 @@ def _add_time_args(sp):
     sp.add_argument('--end', metavar='TIME',
                     help='end time, same format (omit = no upper bound)')
 
+
 def _add_filter(sp):
     sp.add_argument('--filter', metavar='K1,K2,...',
                     type=lambda s: [k.strip() for k in s.split(',') if k.strip()],
-                    help='comma-separated keywords, substring-matched against signal paths')
+                    help='comma-separated substring/glob patterns, case-insensitive')
+
+
+def _add_common(sp):
+    # Also accept global-style output controls after the subcommand.
+    # Defaults are SUPPRESS so values supplied before the subcommand survive.
+    sp.add_argument('--json', action='store_true', default=argparse.SUPPRESS,
+                    help='output compact structured JSON instead of text')
+    sp.add_argument('--limit', type=int, default=argparse.SUPPRESS,
+                    help='max rows/records to output; default 200; 0 = unlimited')
+    sp.add_argument('--verbose', action='store_true', default=argparse.SUPPRESS,
+                    help='show extra fields; if --limit is omitted, disables truncation')
+
 
 def main():
     p = argparse.ArgumentParser(
@@ -1121,56 +1238,51 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--json', action='store_true',
-                   help='output structured JSON instead of human-readable text')
+                   help='output compact structured JSON instead of text')
+    p.add_argument('--limit', type=int, default=None,
+                   help='max rows/records to output; default 200; 0 = unlimited')
+    p.add_argument('--verbose', action='store_true',
+                   help='show extra fields; if --limit is omitted, disables truncation')
     p.add_argument('--version', action='version', version='%(prog)s ' + __version__)
     sub = p.add_subparsers(dest='cmd', metavar='<command>')
 
     sp = sub.add_parser('info', help='file overview: timescale, signal count, time span, scopes')
-    sp.add_argument('file', metavar='<file>', help='VCD file path')
+    sp.add_argument('file', metavar='<file>', help='VCD file path'); _add_common(sp)
 
     sp = sub.add_parser('list', help='list signals with path and bit width')
-    sp.add_argument('file', metavar='<file>'); _add_filter(sp)
+    sp.add_argument('file', metavar='<file>'); _add_filter(sp); _add_common(sp)
 
-    sp = sub.add_parser('dump', help='print signal value changes in time order')
-    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp)
+    sp = sub.add_parser('dump', help='print value-change events in time order')
+    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp); _add_common(sp)
 
-    sp = sub.add_parser('summary', help='per-signal stats over a time window, including carried static known values')
-    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp)
-    sp.add_argument('--limit', type=int, default=50, help='max rows to print/return; 0 = unlimited')
-
-    sp = sub.add_parser('edges', help='1-bit edge detection with frequency estimation')
-    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp)
+    sp = sub.add_parser('summary', help='window stats: active/static/undefined selected signals')
+    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp); _add_common(sp)
 
     sp = sub.add_parser('snapshot', help='known signal values at a given time point')
     sp.add_argument('file', metavar='<file>')
     sp.add_argument('--at', metavar='TIME', required=True, help='time point, e.g. 17.55us')
-    _add_filter(sp)
+    _add_filter(sp); _add_common(sp)
 
-    sp = sub.add_parser('compare', help='diff signal values between two time points')
+    sp = sub.add_parser('compare', help='diff known signal values between two time points')
     sp.add_argument('file', metavar='<file>')
     sp.add_argument('--at', metavar='T1,T2', required=True, help='two time points comma-separated, e.g. 17.5us,17.7us')
-    _add_filter(sp)
+    _add_filter(sp); _add_common(sp)
 
     sp = sub.add_parser('search', help='find stable intervals where signal state equals a value')
-    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp)
-    sp.add_argument('--signal', metavar='KEYWORD', help='keyword to narrow which signals to search')
+    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp); _add_common(sp)
+    sp.add_argument('--signal', metavar='PATTERN', help='pattern to narrow which signals to search')
     sp.add_argument('--value', metavar='VAL', required=True,
-                    help='target value: decimal (42), hex (0x2a), or binary (101010)')
-    sp.add_argument('--limit', type=int, default=200, help='max intervals to print/return; 0 = unlimited')
+                    help='target value: decimal (42), hex (0x2a), or binary (0b101010 or b101010)')
 
     args = p.parse_args()
     if not args.cmd:
         p.print_help()
         sys.exit(1)
 
-    # Friendly errors for common CLI mistakes (no Python traceback to user).
-    # Time-arg parsing happens lazily inside each cmd via parse_time(); we
-    # surface those as concise errors here.
     try:
         vcd = VCDParser(args.file)
         cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
-                'edges': cmd_edges, 'snapshot': cmd_snapshot,
-                'compare': cmd_compare, 'search': cmd_search}
+                'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search}
         cmds[args.cmd](vcd, args)
     except FileNotFoundError as e:
         sys.exit('Error: cannot open VCD file: {}'.format(e.filename or args.file))
@@ -1183,18 +1295,12 @@ def main():
 
 
 if __name__ == '__main__':
-    # Make `vcd_analyzer ... | head` and similar CLI pipelines work cleanly
-    # without spewing BrokenPipeError tracebacks. On POSIX, restoring SIGPIPE
-    # to SIG_DFL causes Python to die silently as a real Unix tool would.
-    # On Windows there's no SIGPIPE; fall back to catching the exception.
     import signal as _sig
     if hasattr(_sig, 'SIGPIPE'):
         _sig.signal(_sig.SIGPIPE, _sig.SIG_DFL)
     try:
         main()
     except BrokenPipeError:
-        # Reroute stdout to devnull so the interpreter's final flush at exit
-        # doesn't raise a second BrokenPipeError on the already-broken pipe.
         try:
             os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         except Exception:

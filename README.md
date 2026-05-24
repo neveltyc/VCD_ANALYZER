@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.1.8`
+        Version `1.2.0`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Upgrade legacy value search from point hits to interval-style results.
-- Add explicit target parsing and width-aware value matching helpers.
-- Keep edge analysis available while modernizing the search output payload.
+        - Drop the dedicated edges command from the public CLI.
+- Introduce shared JSON, clipping, and summary row helpers.
+- Retain the legacy interval-based search interface for this major line.
 
         ## Commands
 
@@ -20,7 +20,6 @@
 - `list`
 - `dump`
 - `summary`
-- `edges`
 - `snapshot`
 - `compare`
 - `search`
@@ -37,18 +36,20 @@ Commands:
   list       <file> [--filter K1,K2]               List signals with path and bit width
   dump       <file> [--begin T] [--end T] [--filter K1,K2]   Print signal value changes in time order
   summary    <file> [--begin T] [--end T] [--filter K1,K2]   Per-signal stats: change count, unique values, static detection
-  edges      <file> [--begin T] [--end T] [--filter K1,K2]   1-bit edge detection with frequency estimation
   snapshot   <file> --at T [--filter K1,K2]        Known signal values at a given time point
   compare    <file> --at T1,T2 [--filter K1,K2]    Diff signal values between two time points
   search     <file> --value V [--signal K] [--begin T] [--end T] [--filter K1,K2]   Find intervals where signal state equals a value
 
-Global option:
-  --json    Output structured JSON instead of text (for programmatic parsing)
+Global options:
+  --json       Output compact structured JSON instead of text
+  --limit N    Max rows/records to output; default 200; 0 = unlimited
+  --verbose    Show extra fields; if --limit is omitted, disables truncation
 
 Argument formats:
   <file>          VCD file path
-  --filter K1,K2  Comma-separated keywords, substring-matched against signal paths (case-insensitive)
-                  e.g. --filter clk,rst   --filter tdata,tvalid   --filter u_dll_ctrl
+  --filter K1,K2  Comma-separated patterns. Plain text uses case-insensitive substring match;
+                  patterns containing *, ?, or [ use case-insensitive glob match.
+                  e.g. --filter clk,rst   --filter '*_valid,*_ready,*_data'   --filter 'top.u_dma.*'
   --begin T       Start time with optional unit suffix: 0, 100ns, 17.5us, 1ms, 500ps, 200fs
   --end T         End time, same format as --begin. Omit for no upper bound
   --at T          Time point for snapshot. For compare: two points comma-separated: --at 17.5us,17.7us
@@ -63,7 +64,6 @@ Examples:
   vcd_analyzer list sim.vcd --filter tdata,tvalid,tready
   vcd_analyzer dump sim.vcd --begin 17.5us --end 17.6us --filter clk,rst,state
   vcd_analyzer summary sim.vcd --filter dll_st,locked
-  vcd_analyzer edges sim.vcd --filter clk_500M
   vcd_analyzer snapshot sim.vcd --at 17.55us --filter init_done,state
   vcd_analyzer compare sim.vcd --at 17.535us,17.56us --filter init_done,link_active,state
   vcd_analyzer search sim.vcd --signal state --value 5

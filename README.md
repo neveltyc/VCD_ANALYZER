@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.3.0`
+        Version `1.3.1`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Replace legacy value search with condition-based search, show-signals, and changed-signal modes.
-- Keep the rest of the waveform inspection CLI familiar while modernizing search semantics.
-- Introduce a dedicated sanitized search fixture for the new interface.
+        - Add lower-bound counting helpers for truncated dump and search results.
+- Improve JSON and text reporting when scans stop after the first hidden record.
+- Keep the sanitized condition-search tests aligned with the new result metadata.
 
         ## Commands
 

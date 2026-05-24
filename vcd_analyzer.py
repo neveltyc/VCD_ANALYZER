@@ -45,7 +45,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.3.0'
+__version__ = '1.3.1'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -875,139 +875,144 @@ class VCDParser:
                 return t not in self.signals and t not in self._bit_map
             return False
 
-        while True:
-            tok = _next()
-            if tok is None:
-                break
-            # Top-level: any unknown $keyword starts a section ending at
-            # $end. This is safer than passing the body through as value
-            # changes — '$bogus 1! $end' must not pollute the waveform.
-            # Known wrappers ($dumpvars etc) are pass-through (their body
-            # IS value_changes per 18.2.3.9-12).
-            if tok == '$end':
-                continue
-            if tok in _SIM_KEYWORDS:
-                continue
-            if tok.startswith('$'):
-                # $comment, $vcdclose, $bogus, ...: drop body to $end
-                for t in raw:
-                    if t == '$end':
-                        break
-                continue
-
-            if tok.startswith('#') and len(tok) > 1 and tok[1].isdigit():
-                new_t = _parse_vcd_timestamp_token(tok)
-                if new_t is None:
-                    # Malformed (e.g. '#1.5'); silently skip per round-7 policy.
+        try:
+            while True:
+                tok = _next()
+                if tok is None:
+                    break
+                # Top-level: any unknown $keyword starts a section ending at
+                # $end. This is safer than passing the body through as value
+                # changes — '$bogus 1! $end' must not pollute the waveform.
+                # Known wrappers ($dumpvars etc) are pass-through (their body
+                # IS value_changes per 18.2.3.9-12).
+                if tok == '$end':
                     continue
-                if cur_t >= t0:
-                    for sid, val in _flush():
-                        yield cur_t, sid, val
-                cur_t = new_t
-                if t1 is not None and cur_t > t1:
-                    return
-                continue
-
-            # Parse one value_change. May consume 1, 2, or 4 tokens.
-            # Each branch validates body shape AND that the consumed sym
-            # is not actually a structural token; malformed inputs are
-            # skipped without corrupting downstream parsing state.
-            first = tok[0]
-            if first in '01xXzZ':
-                val = first.lower()
-                sym = tok[1:]
-                if not sym:
+                if tok in _SIM_KEYWORDS:
                     continue
-            elif first in 'bB':
-                bits = tok[1:]
-                if not bits or any(c not in '01xXzZ' for c in bits):
-                    continue  # malformed body; do NOT consume next token
-                sym = _next()
-                if _looks_structural(sym):
-                    if sym is not None:
-                        pushback.append(sym)
+                if tok.startswith('$'):
+                    # $comment, $vcdclose, $bogus, ...: drop body to $end
+                    for t in raw:
+                        if t == '$end':
+                            break
                     continue
-                val = bits.lower()
-            elif first in 'rR':
-                body = tok[1:]
-                # Length cap defends against malicious VCDs that try to
-                # exploit regex worst-case behavior with multi-KB tokens.
-                # Legitimate %.16g output is ~25 chars max.
-                if len(body) > _REAL_MAX_LEN or not _REAL_RE.match(body):
-                    continue  # 'reset', 'rXYZ' etc — not a real value
-                sym = _next()
-                if _looks_structural(sym):
-                    if sym is not None:
-                        pushback.append(sym)
+    
+                if tok.startswith('#') and len(tok) > 1 and tok[1].isdigit():
+                    new_t = _parse_vcd_timestamp_token(tok)
+                    if new_t is None:
+                        # Malformed (e.g. '#1.5'); silently skip per round-7 policy.
+                        continue
+                    if cur_t >= t0:
+                        for sid, val in _flush():
+                            yield cur_t, sid, val
+                    cur_t = new_t
+                    if t1 is not None and cur_t > t1:
+                        return
                     continue
-                val = body
-            elif first == 'p':
-                # Extended VCD (18.4.3.1): p<state> <s0> <s1> <id>
-                # Strength components are single digits 0-7. Validate
-                # before consuming further tokens so a malformed
-                # 'pH #10 1!' doesn't swallow the #10 timestamp.
-                state = tok[1:] if len(tok) > 1 else ''
-                _s0 = _next()
-                if _s0 is None or len(_s0) != 1 or _s0 not in '01234567':
-                    if _s0 is not None:
+    
+                # Parse one value_change. May consume 1, 2, or 4 tokens.
+                # Each branch validates body shape AND that the consumed sym
+                # is not actually a structural token; malformed inputs are
+                # skipped without corrupting downstream parsing state.
+                first = tok[0]
+                if first in '01xXzZ':
+                    val = first.lower()
+                    sym = tok[1:]
+                    if not sym:
+                        continue
+                elif first in 'bB':
+                    bits = tok[1:]
+                    if not bits or any(c not in '01xXzZ' for c in bits):
+                        continue  # malformed body; do NOT consume next token
+                    sym = _next()
+                    if _looks_structural(sym):
+                        if sym is not None:
+                            pushback.append(sym)
+                        continue
+                    val = bits.lower()
+                elif first in 'rR':
+                    body = tok[1:]
+                    # Length cap defends against malicious VCDs that try to
+                    # exploit regex worst-case behavior with multi-KB tokens.
+                    # Legitimate %.16g output is ~25 chars max.
+                    if len(body) > _REAL_MAX_LEN or not _REAL_RE.match(body):
+                        continue  # 'reset', 'rXYZ' etc — not a real value
+                    sym = _next()
+                    if _looks_structural(sym):
+                        if sym is not None:
+                            pushback.append(sym)
+                        continue
+                    val = body
+                elif first == 'p':
+                    # Extended VCD (18.4.3.1): p<state> <s0> <s1> <id>
+                    # Strength components are single digits 0-7. Validate
+                    # before consuming further tokens so a malformed
+                    # 'pH #10 1!' doesn't swallow the #10 timestamp.
+                    state = tok[1:] if len(tok) > 1 else ''
+                    _s0 = _next()
+                    if _s0 is None or len(_s0) != 1 or _s0 not in '01234567':
+                        if _s0 is not None:
+                            pushback.append(_s0)
+                        continue
+                    _s1 = _next()
+                    if _s1 is None or len(_s1) != 1 or _s1 not in '01234567':
+                        if _s1 is not None:
+                            pushback.append(_s1)
                         pushback.append(_s0)
-                    continue
-                _s1 = _next()
-                if _s1 is None or len(_s1) != 1 or _s1 not in '01234567':
-                    if _s1 is not None:
+                        continue
+                    sym = _next()
+                    if _looks_structural(sym):
+                        if sym is not None:
+                            pushback.append(sym)
                         pushback.append(_s1)
-                    pushback.append(_s0)
+                        pushback.append(_s0)
+                        continue
+                    val = _PORT_STATE.get(state, 'x')
+                else:
+                    continue  # unparseable token
+    
+                # Catch-up before t0: update bit_state only, don't emit.
+                # Standalone state is owned by callers (e.g. _build_snapshot
+                # accumulates it from yielded events), so nothing to do here
+                # for the standalone case — the continue is correct.
+                if cur_t < t0:
+                    if sym in bit_map:
+                        for gid, idx in bit_map[sym]:
+                            bit_state[gid][idx] = val
                     continue
-                sym = _next()
-                if _looks_structural(sym):
-                    if sym is not None:
-                        pushback.append(sym)
-                    pushback.append(_s1)
-                    pushback.append(_s0)
-                    continue
-                val = _PORT_STATE.get(state, 'x')
-            else:
-                continue  # unparseable token
-
-            # Catch-up before t0: update bit_state only, don't emit.
-            # Standalone state is owned by callers (e.g. _build_snapshot
-            # accumulates it from yielded events), so nothing to do here
-            # for the standalone case — the continue is correct.
-            if cur_t < t0:
+    
+                # Bit-exploded signal: aggregate into virtual bus value(s).
+                # If the same identifier_code drives multiple synthesized buses
+                # (via aliased parent declarations), each gets its own event.
+                #
+                # IMPORTANT: do NOT continue after this branch. Per IEEE 1364-2005
+                # 18.2.3.7, the same identifier_code can be referenced by both a
+                # standalone $var (e.g. clk) AND a bit-select $var (e.g.
+                # data_bus[0]) when RTL assigns one to the other. If we continued,
+                # the standalone alias would silently never emit events and the
+                # agent would see clk as a flat line. Fall through to the
+                # standalone block so both signals update on the same value_change.
                 if sym in bit_map:
                     for gid, idx in bit_map[sym]:
                         bit_state[gid][idx] = val
-                continue
-
-            # Bit-exploded signal: aggregate into virtual bus value(s).
-            # If the same identifier_code drives multiple synthesized buses
-            # (via aliased parent declarations), each gets its own event.
-            #
-            # IMPORTANT: do NOT continue after this branch. Per IEEE 1364-2005
-            # 18.2.3.7, the same identifier_code can be referenced by both a
-            # standalone $var (e.g. clk) AND a bit-select $var (e.g.
-            # data_bus[0]) when RTL assigns one to the other. If we continued,
-            # the standalone alias would silently never emit events and the
-            # agent would see clk as a flat line. Fall through to the
-            # standalone block so both signals update on the same value_change.
-            if sym in bit_map:
-                for gid, idx in bit_map[sym]:
-                    bit_state[gid][idx] = val
-                    if sids is None or gid in sids:
-                        pending[gid] = ''.join(reversed(bit_state[gid]))
-
-            # Standalone signal (may run after the bit-bus branch above when
-            # the sym serves both roles).
-            if sym not in self.signals:
-                continue
-            if sids is not None and sym not in sids:
-                continue
-            pending[sym] = val
-
-        # Final flush
-        if cur_t >= t0:
-            for sid, val in _flush():
-                yield cur_t, sid, val
+                        if sids is None or gid in sids:
+                            pending[gid] = ''.join(reversed(bit_state[gid]))
+    
+                # Standalone signal (may run after the bit-bus branch above when
+                # the sym serves both roles).
+                if sym not in self.signals:
+                    continue
+                if sids is not None and sym not in sids:
+                    continue
+                pending[sym] = val
+    
+            # Final flush
+            if cur_t >= t0:
+                for sid, val in _flush():
+                    yield cur_t, sid, val
+        finally:
+            close = getattr(raw, 'close', None)
+            if close is not None:
+                close()
 
     def scan_time_range(self):
         """Min/max timestamps in the file. If any value_change occurs before
@@ -1135,6 +1140,30 @@ def _trunc_line(shown, total, noun):
     return '... truncated: {}/{} {} shown.'.format(shown, total, noun)
 
 
+def _trunc_line_lower_bound(shown, noun):
+    """Truncation line when scanning stopped at the first unshown result.
+
+    Used by streaming commands where --limit is an execution bound, not just
+    an output bound. We intentionally avoid claiming an exact total.
+    """
+    return '... truncated: {}/{}+ {} shown.'.format(shown, shown, noun)
+
+
+def _total_json_fields(total, truncated):
+    """Return JSON count fields for exact vs early-stopped result sets.
+
+    When truncated is true, total is only a lower bound (usually limit+1).
+    Keeping it numeric is convenient for agents, while total_is_exact prevents
+    consumers from treating it as the real global count.
+    """
+    return {'total': total, 'total_is_exact': not truncated}
+
+
+def _count_label(shown, total, truncated):
+    """Human count label for result headers."""
+    return '{}+'.format(shown) if truncated else str(total)
+
+
 def _selected_sids(vcd, sids):
     """Return an explicit set of selected signal ids."""
     return set(vcd.signals.keys()) if sids is None else set(sids)
@@ -1158,23 +1187,19 @@ def _build_snapshot(vcd, t_at, sids=None):
 
 
 def _parse_target_value(text):
-    """Parse search target once with bounded cost.
+    """Parse search/condition target once with bounded cost.
 
     Returns (target_raw, target_int):
 
-      - target_int is not None for unambiguous numeric targets. Later matching
-        uses numeric equality only, so decimal ``10`` will not accidentally
-        match a 2-bit waveform value ``10`` (binary decimal 2).
+      - Numeric targets (decimal, 0x..., 0b..., b...) get target_int and are
+        matched only by numeric equality.
+      - 4-state binary literals with x/z keep a raw bit-string target. Explicit
+        binary prefixes are stripped because VCD stores vector values as
+        ``1x0`` internally, not ``b1x0``.
 
-      - target_raw is used only for non-numeric / 4-state literal matching.
-        For explicit binary prefixes, strip the prefix before raw matching:
-        VCD stores vector value_changes internally as ``1x0`` rather than
-        ``b1x0``. Therefore both ``--value b1x0`` and ``--value 1x0`` should
-        match an internal value ``1x0``.
-
-    Defensive bounds avoid Python 3.9 int() CPU DoS on huge decimal strings.
-    Binary/hex targets are bounded by MAX_SIGNAL_WIDTH because searching a
-    legitimate wide bus should remain possible.
+    Invalid hex and negative decimal targets are rejected rather than silently
+    producing no matches; VCD value_change text is unsigned, and x/z literals
+    should be written in binary form (e.g. b1x0z).
     """
     if text is None:
         raise _ValueParseError('target value must not be empty')
@@ -1185,45 +1210,67 @@ def _parse_target_value(text):
         raise _ValueParseError(
             'target value too long; max length is {}'.format(MAX_VALUE_ARG_LEN))
 
+    if raw.startswith('-'):
+        raise _ValueParseError(
+            'negative target values are not supported for VCD signal matching')
+
     if raw.startswith('0x'):
         body = raw[2:]
+        if not body:
+            raise _ValueParseError('hex target must contain at least one digit')
         if len(body) > MAX_HEX_VALUE_DIGITS:
             raise _ValueParseError(
                 'hex target too wide; max hex digits is {}'.format(MAX_HEX_VALUE_DIGITS))
         try:
             return raw, int(raw, 16)
         except ValueError:
-            return raw, None
+            raise _ValueParseError(
+                'invalid hex target {!r}; x/z literals must use binary form like b1x0z'.format(text))
 
     if raw.startswith('0b'):
         body = raw[2:]
+        if not body:
+            raise _ValueParseError('binary target must contain at least one bit')
         if len(body) > MAX_SIGNAL_WIDTH:
             raise _ValueParseError(
                 'binary target too wide; max bits is {}'.format(MAX_SIGNAL_WIDTH))
         try:
             return body, int(body, 2)
         except ValueError:
-            return body, None
+            if all(c in '01xz' for c in body):
+                return body, None
+            raise _ValueParseError(
+                'invalid binary target {!r}; expected only 0/1/x/z'.format(text))
 
     if raw.startswith('b'):
         body = raw[1:]
+        if not body:
+            raise _ValueParseError('binary target must contain at least one bit')
         if len(body) > MAX_SIGNAL_WIDTH:
             raise _ValueParseError(
                 'binary target too wide; max bits is {}'.format(MAX_SIGNAL_WIDTH))
         try:
             return body, int(body, 2)
         except ValueError:
-            return body, None
+            if all(c in '01xz' for c in body):
+                return body, None
+            raise _ValueParseError(
+                'invalid binary target {!r}; expected only 0/1/x/z'.format(text))
 
     # Bare target: decimal numeric if possible, otherwise literal 4-state
     # string (e.g. ``1x0``). Cap pure decimal digit count before int().
-    signless = raw[1:] if raw[:1] in '+-' else raw
-    if signless.isdigit() and len(signless) > MAX_DECIMAL_VALUE_DIGITS:
+    if raw.startswith('+'):
+        raise _ValueParseError(
+            'signed target values are not supported; write unsigned values')
+    if raw.isdigit() and len(raw) > MAX_DECIMAL_VALUE_DIGITS:
         raise _ValueParseError(
             'decimal target too long; max digits is {}'.format(MAX_DECIMAL_VALUE_DIGITS))
     try:
         return raw, int(raw)
     except ValueError:
+        if len(raw) > MAX_SIGNAL_WIDTH:
+            raise _ValueParseError(
+                'literal target too wide; max characters is {}'.format(MAX_SIGNAL_WIDTH))
         return raw, None
 
 
@@ -1396,10 +1443,13 @@ def _condition_result_text(conditions):
 
 
 def _show_values(vcd, state, show_sids, verbose=False):
-    """Return display values for show signals in current state."""
+    """Return (values, meta) for show signals in current state.
+
+    The return shape is intentionally stable regardless of verbose. meta is
+    None unless verbose=True. This avoids type-dependent unpacking in search.
+    """
     values = {}
-    if verbose:
-        meta = {}
+    meta = {} if verbose else None
     for sid in show_sids:
         info = vcd.signals[sid]
         path = info['path']
@@ -1407,7 +1457,7 @@ def _show_values(vcd, state, show_sids, verbose=False):
         values[path] = fmt_val(raw, info) if raw is not None else '(undef)'
         if verbose:
             meta[path] = {'raw': raw, 'width': info['width'], 'type': info.get('type', 'wire')}
-    return (values, meta) if verbose else values
+    return values, meta
 
 
 def _values_text(values):
@@ -1667,20 +1717,24 @@ def cmd_dump(vcd, args):
     sids = vcd.match(args.filter)
     limit = _limit(args, 'dump')
     total = 0
+    truncated = False
     events = []
     for t, sid, val in vcd.iter_events(t0, t1, sids):
         total += 1
-        if limit == 0 or len(events) < limit:
-            info = vcd.signals[sid]
-            e = {'time': t, 'time_ticks': t, 'time_h': fmt_time(t, ts),
-                 'path': info['path'], 'value': fmt_val(val, info)}
-            if getattr(args, 'verbose', False):
-                e['width'] = info['width']
-                e['type'] = info.get('type', 'wire')
-            events.append(e)
-    trunc = limit != 0 and total > len(events)
+        if limit != 0 and len(events) >= limit:
+            truncated = True
+            break
+        info = vcd.signals[sid]
+        e = {'time': t, 'time_ticks': t, 'time_h': fmt_time(t, ts),
+             'path': info['path'], 'value': fmt_val(val, info)}
+        if getattr(args, 'verbose', False):
+            e['width'] = info['width']
+            e['type'] = info.get('type', 'wire')
+        events.append(e)
     if args.json:
-        _json({'total': total, 'shown': len(events), 'truncated': trunc, 'events': events})
+        obj = {'shown': len(events), 'truncated': truncated, 'events': events}
+        obj.update(_total_json_fields(total, truncated))
+        _json(obj)
         return
     if not events:
         print('(no changes in range)')
@@ -1694,8 +1748,8 @@ def cmd_dump(vcd, args):
             print('  {:<55} w={} {} = {}'.format(e['path'], e.get('width'), e.get('type'), e['value']))
         else:
             print('  {:<55} = {}'.format(e['path'], e['value']))
-    if trunc:
-        print(_trunc_line(len(events), total, 'events'))
+    if truncated:
+        print(_trunc_line_lower_bound(len(events), 'events'))
 
 
 def cmd_summary(vcd, args):
@@ -1873,25 +1927,26 @@ def cmd_search(vcd, args):
     if changed_sid is not None:
         events = []
         total = 0
+        truncated = False
         for t, group in _event_groups(vcd, t0, t1, selected):
             changed = set()
             for sid, val in group:
+                if state.get(sid) != val:
+                    changed.add(sid)
                 state[sid] = val
-                changed.add(sid)
             if changed_sid not in changed:
                 continue
             if not _conditions_hold(state, conditions):
                 continue
-            values = _show_values(vcd, state, show_sids, verbose)
-            if verbose:
-                values, meta = values
+            values, meta = _show_values(vcd, state, show_sids, verbose)
             event = {'time_ticks': t, 'time_h': fmt_time(t, ts), 'values': values}
             if verbose:
                 event['meta'] = meta
             total += 1
-            if limit == 0 or len(events) < limit:
-                events.append(event)
-        trunc = limit != 0 and total > len(events)
+            if limit != 0 and len(events) >= limit:
+                truncated = True
+                break
+            events.append(event)
         if args.json:
             obj = {'mode': 'event', 'condition': cond_label,
                    'condition_resolved': cond_text,
@@ -1899,19 +1954,20 @@ def cmd_search(vcd, args):
                    'show': [vcd.signals[sid]['path'] for sid in show_sids],
                    'begin_ticks': t0, 'begin_h': fmt_time(t0, ts),
                    'end_ticks': t1, 'end_h': fmt_time(t1, ts),
-                   'total': total, 'shown': len(events), 'truncated': trunc,
+                   'shown': len(events), 'truncated': truncated,
                    'events': events}
+            obj.update(_total_json_fields(total, truncated))
             _json(obj)
             return
         if events:
-            print('Found: {} event(s)'.format(total))
+            print('Found: {} event(s)'.format(_count_label(len(events), total, truncated)))
             for e in events:
                 print('  T={:<12} {}'.format(e['time_h'], _values_text(e['values'])))
-            if trunc:
-                print(_trunc_line(len(events), total, 'events'))
+            if truncated:
+                print(_trunc_line_lower_bound(len(events), 'events'))
         else:
-            print('No event in {}..{} where {} and {} changes.'.format(
-                fmt_time(t0, ts), fmt_time(t1, ts), cond_text, vcd.signals[changed_sid]['path']))
+            print('No event in {}..{} where {} changed and {}.'.format(
+                fmt_time(t0, ts), fmt_time(t1, ts), vcd.signals[changed_sid]['path'], cond_text))
         return
 
     # Interval/segment mode. A segment is an interval further split whenever
@@ -1919,30 +1975,34 @@ def cmd_search(vcd, args):
     has_show = bool(show_sids)
     active = _conditions_hold(state, conditions)
     seg_start = t0 if active else None
-    seg_values = _show_values(vcd, state, show_sids, verbose) if (active and has_show) else None
-    if active and has_show and verbose:
-        seg_values, seg_meta = seg_values
-    else:
-        seg_meta = None
+    seg_values = None
+    seg_meta = None
+    if active and has_show:
+        seg_values, seg_meta = _show_values(vcd, state, show_sids, verbose)
 
     results = []
     total = 0
+    truncated = False
 
     def emit_interval(a, b):
         return {'begin_ticks': a, 'begin_h': fmt_time(a, ts),
                 'end_ticks': b, 'end_h': fmt_time(b, ts)}
 
     def append_result(row):
-        nonlocal total
+        nonlocal total, truncated
         total += 1
-        if limit == 0 or len(results) < limit:
-            results.append(row)
+        if limit != 0 and len(results) >= limit:
+            truncated = True
+            return True
+        results.append(row)
+        return False
 
     for t, group in _event_groups(vcd, t0, t1, selected):
         changed = set()
         for sid, val in group:
+            if state.get(sid) != val:
+                changed.add(sid)
             state[sid] = val
-            changed.add(sid)
 
         cond_ok = _conditions_hold(state, conditions)
         if not has_show:
@@ -1950,7 +2010,8 @@ def cmd_search(vcd, args):
                 active = True
                 seg_start = t
             elif not cond_ok and active:
-                append_result(emit_interval(seg_start, t))
+                if append_result(emit_interval(seg_start, t)):
+                    break
                 active = False
                 seg_start = None
             continue
@@ -1961,19 +2022,15 @@ def cmd_search(vcd, args):
                 row['values'] = seg_values
                 if verbose:
                     row['meta'] = seg_meta
-                append_result(row)
+                if append_result(row):
+                    break
                 active = False
                 seg_start = None
                 seg_values = None
                 seg_meta = None
             continue
 
-        new_values = _show_values(vcd, state, show_sids, verbose)
-        if verbose:
-            new_values, new_meta = new_values
-        else:
-            new_meta = None
-
+        new_values, new_meta = _show_values(vcd, state, show_sids, verbose)
         if not active:
             active = True
             seg_start = t
@@ -1984,12 +2041,13 @@ def cmd_search(vcd, args):
             row['values'] = seg_values
             if verbose:
                 row['meta'] = seg_meta
-            append_result(row)
+            if append_result(row):
+                break
             seg_start = t
             seg_values = new_values
             seg_meta = new_meta
 
-    if active:
+    if active and not truncated:
         row = emit_interval(seg_start, t1)
         if has_show:
             row['values'] = seg_values
@@ -1997,7 +2055,6 @@ def cmd_search(vcd, args):
                 row['meta'] = seg_meta
         append_result(row)
 
-    trunc = limit != 0 and total > len(results)
     if args.json:
         key = 'segments' if has_show else 'intervals'
         obj = {'mode': 'segment' if has_show else 'interval',
@@ -2006,22 +2063,23 @@ def cmd_search(vcd, args):
                'show': [vcd.signals[sid]['path'] for sid in show_sids],
                'begin_ticks': t0, 'begin_h': fmt_time(t0, ts),
                'end_ticks': t1, 'end_h': fmt_time(t1, ts),
-               'total': total, 'shown': len(results), 'truncated': trunc,
+               'shown': len(results), 'truncated': truncated,
                key: results}
+        obj.update(_total_json_fields(total, truncated))
         _json(obj)
         return
 
     noun = 'segment' if has_show else 'interval'
     if results:
-        print('Found: {} {}(s)'.format(total, noun))
+        print('Found: {} {}(s)'.format(_count_label(len(results), total, truncated), noun))
         for r in results:
             if has_show:
                 print('  {:<12}..{:<12} {}'.format(
                     r['begin_h'], r['end_h'], _values_text(r['values'])))
             else:
                 print('  {:<12}..{:<12} {}'.format(r['begin_h'], r['end_h'], cond_text))
-        if trunc:
-            print(_trunc_line(len(results), total, noun + 's'))
+        if truncated:
+            print(_trunc_line_lower_bound(len(results), noun + 's'))
     else:
         print('No {} in {}..{} where {}.'.format(
             noun, fmt_time(t0, ts), fmt_time(t1, ts), cond_text))

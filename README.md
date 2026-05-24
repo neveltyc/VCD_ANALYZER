@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.2.11`
+        Version `1.2.12`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Refine recovery from malformed data tokens and skipped sections.
-- Continue tightening tolerant-reader behavior for imperfect traces.
-- Maintain the same repository structure and smoke tests.
+        - Add date, version, and comment metadata capture from VCD headers.
+- Strengthen resource caps around parser state and metadata retention.
+- Keep the legacy interval-based search interface as the last 1.2 branch.
 
         ## Commands
 

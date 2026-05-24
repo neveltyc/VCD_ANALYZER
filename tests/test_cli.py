@@ -13,7 +13,7 @@ FIX_HANDSHAKE = ROOT / "tests" / "fixtures" / "handshake_trace.vcd"
 FIX_BUS_RANGE = ROOT / "tests" / "fixtures" / "bus_range_trace.vcd"
 FIX_ESCAPED = ROOT / "tests" / "fixtures" / "escaped_trace.vcd"
 
-VERSION = "1.2.11"
+VERSION = "1.2.12"
 LEGACY_SEARCH = True
 SUPPORTS_EDGES = False
 SUPPORTS_HANDSHAKE = False

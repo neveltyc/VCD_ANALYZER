@@ -43,7 +43,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.2.11'
+__version__ = '1.2.12'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -95,6 +95,9 @@ MAX_FILTER_WILDCARDS = 16
 #    are noted inline where they apply.
 MAX_INT_DIGITS = 100              # any int-from-string in header (width, bit idx, msb/lsb)
 MAX_SIGNAL_WIDTH = MAX_REASSEMBLE_BITS  # max bits per single $var declaration
+MAX_VALUE_ARG_LEN = MAX_SIGNAL_WIDTH + 2  # target value string, allows b<MAX_SIGNAL_WIDTH bits>
+MAX_DECIMAL_VALUE_DIGITS = 100  # avoid Python 3.9 int() CPU DoS on --value decimal
+MAX_HEX_VALUE_DIGITS = max(1, (MAX_SIGNAL_WIDTH + 3) // 4)
 MAX_HEADER_BODY_TOKENS = 131072   # any $<kw>...$end section body length (metadata-only effect:
                                   # truncates $comment / $date / $version bodies; $var bodies
                                   # are never long enough to be affected in practice)
@@ -165,6 +168,10 @@ class _TimeParseError(ValueError):
 class _FilterParseError(argparse.ArgumentTypeError):
     """Raised when --filter contains an unsafe or unsupported pattern.
     argparse handles this automatically with a friendly message."""
+
+
+class _ValueParseError(ValueError):
+    """Raised when --value is too large or malformed beyond tolerant matching."""
 
 
 class _VCDResourceError(RuntimeError):
@@ -1145,22 +1152,73 @@ def _build_snapshot(vcd, t_at, sids=None):
 
 
 def _parse_target_value(text):
-    """Parse search target once. Raw string is kept for x/z matches;
-    integer form is used for width-independent numeric matches."""
-    raw = text.lower().strip()
-    intval = None
+    """Parse search target once with bounded cost.
+
+    Returns (target_raw, target_int):
+
+      - target_int is not None for unambiguous numeric targets. Later matching
+        uses numeric equality only, so decimal ``10`` will not accidentally
+        match a 2-bit waveform value ``10`` (binary decimal 2).
+
+      - target_raw is used only for non-numeric / 4-state literal matching.
+        For explicit binary prefixes, strip the prefix before raw matching:
+        VCD stores vector value_changes internally as ``1x0`` rather than
+        ``b1x0``. Therefore both ``--value b1x0`` and ``--value 1x0`` should
+        match an internal value ``1x0``.
+
+    Defensive bounds avoid Python 3.9 int() CPU DoS on huge decimal strings.
+    Binary/hex targets are bounded by MAX_SIGNAL_WIDTH because searching a
+    legitimate wide bus should remain possible.
+    """
+    if text is None:
+        raise _ValueParseError('target value must not be empty')
+    raw = str(text).lower().strip()
+    if not raw:
+        raise _ValueParseError('target value must not be empty')
+    if len(raw) > MAX_VALUE_ARG_LEN:
+        raise _ValueParseError(
+            'target value too long; max length is {}'.format(MAX_VALUE_ARG_LEN))
+
+    if raw.startswith('0x'):
+        body = raw[2:]
+        if len(body) > MAX_HEX_VALUE_DIGITS:
+            raise _ValueParseError(
+                'hex target too wide; max hex digits is {}'.format(MAX_HEX_VALUE_DIGITS))
+        try:
+            return raw, int(raw, 16)
+        except ValueError:
+            return raw, None
+
+    if raw.startswith('0b'):
+        body = raw[2:]
+        if len(body) > MAX_SIGNAL_WIDTH:
+            raise _ValueParseError(
+                'binary target too wide; max bits is {}'.format(MAX_SIGNAL_WIDTH))
+        try:
+            return body, int(body, 2)
+        except ValueError:
+            return body, None
+
+    if raw.startswith('b'):
+        body = raw[1:]
+        if len(body) > MAX_SIGNAL_WIDTH:
+            raise _ValueParseError(
+                'binary target too wide; max bits is {}'.format(MAX_SIGNAL_WIDTH))
+        try:
+            return body, int(body, 2)
+        except ValueError:
+            return body, None
+
+    # Bare target: decimal numeric if possible, otherwise literal 4-state
+    # string (e.g. ``1x0``). Cap pure decimal digit count before int().
+    signless = raw[1:] if raw[:1] in '+-' else raw
+    if signless.isdigit() and len(signless) > MAX_DECIMAL_VALUE_DIGITS:
+        raise _ValueParseError(
+            'decimal target too long; max digits is {}'.format(MAX_DECIMAL_VALUE_DIGITS))
     try:
-        if raw.startswith(('0x', '0X')):
-            intval = int(raw, 16)
-        elif raw.startswith('0b'):
-            intval = int(raw[2:], 2)
-        elif raw.startswith('b'):
-            intval = int(raw[1:], 2)
-        else:
-            intval = int(raw)
+        return raw, int(raw)
     except ValueError:
-        pass
-    return raw, intval
+        return raw, None
 
 
 def _value_matches(value, target_raw, target_int):
@@ -1761,6 +1819,8 @@ def main():
     except PermissionError as e:
         sys.exit('Error: permission denied: {}'.format(e.filename or args.file))
     except _TimeParseError as e:
+        sys.exit('Error: ' + str(e))
+    except _ValueParseError as e:
         sys.exit('Error: ' + str(e))
     except _VCDResourceError as e:
         sys.exit('Error: ' + str(e))

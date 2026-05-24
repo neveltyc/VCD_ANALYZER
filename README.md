@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.2.5`
+        Version `1.2.6`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Introduce environment-backed resource limits and filter normalization.
-- Start treating hostile or pathological inputs more defensively.
-- Keep the test library focused on sanitized smoke coverage, not raw customer traces.
+        - Refine real-value parsing and malformed token handling.
+- Continue the defensive-parser work without changing the legacy CLI contract.
+- Retain the same fixture set and interval-style search tests.
 
         ## Commands
 

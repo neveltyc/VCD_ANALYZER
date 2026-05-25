@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.3.5`
+        Version `1.3.6`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Delete the dead interval helper left behind by the search redesign.
-- Keep the user-facing command set stable while simplifying internals.
-- Carry forward the sanitized condition-search regression cases.
+        - Degrade malformed over-wide logic dumps to explicit unknowns instead of plausible numeric values.
+- Retain the 1.3 search contract while improving corrupted-input behavior.
+- Keep the sanitized regression cases aligned with the over-wide handling rules.
 
         ## Commands
 

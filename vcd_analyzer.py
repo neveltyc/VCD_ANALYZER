@@ -51,7 +51,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.3.5'
+__version__ = '1.3.6'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -359,6 +359,12 @@ def fmt_val(value, info):
     if vtype in ('real', 'realtime'):
         return value
     width = info['width']
+    # Malformed VCD may dump more 4-state bits than the declared width
+    # (for example an over-long extended-VCD port state). Do not truncate
+    # to the LSBs: that silently fabricates a plausible numeric value.
+    # Show explicit unknowns instead.
+    if _is_4state_bits(value) and len(value) > width:
+        value = 'x' * width
     if width == 1:
         return value
     # Left-extend short vectors. Writer drops redundant MSB bits when they
@@ -394,6 +400,28 @@ def val_to_int(value):
     except ValueError:
         return None
 
+
+
+
+def _clamp_overwide_logic_value(value, info):
+    """Preserve clean 4-state state while rejecting malformed over-wide dumps.
+
+    Legal VCD writers may omit redundant MSB bits; fmt_val() and condition
+    matching already left-extend short values. A value longer than the
+    declared width is malformed. Do not truncate it to the LSBs: that would
+    turn corrupt input into a plausible-looking numeric value. Instead,
+    degrade to all-x at the declared width so downstream dump/snapshot/search
+    sees an explicit unknown.
+    """
+    vtype = info.get('type', 'wire')
+    if vtype in ('real', 'realtime', 'event'):
+        return value
+    width = info.get('width')
+    if width is None:
+        return value
+    if _is_4state_bits(value) and len(value) > width:
+        return 'x' * width
+    return value
 
 def _normalize_filter_patterns(value):
     """Normalize and bound user-supplied substring/glob patterns.
@@ -1005,8 +1033,9 @@ class VCDParser:
                 # for the standalone case — the continue is correct.
                 if cur_t < t0:
                     if sym in bit_map:
+                        bit_val = val if _is_4state_bits(val) and len(val) == 1 else 'x'
                         for gid, idx in bit_map[sym]:
-                            bit_state[gid][idx] = val
+                            bit_state[gid][idx] = bit_val
                     continue
     
                 # Bit-exploded signal: aggregate into virtual bus value(s).
@@ -1021,8 +1050,9 @@ class VCDParser:
                 # agent would see clk as a flat line. Fall through to the
                 # standalone block so both signals update on the same value_change.
                 if sym in bit_map:
+                    bit_val = val if _is_4state_bits(val) and len(val) == 1 else 'x'
                     for gid, idx in bit_map[sym]:
-                        bit_state[gid][idx] = val
+                        bit_state[gid][idx] = bit_val
                         if sids is None or gid in sids:
                             pending[gid] = ''.join(reversed(bit_state[gid]))
     
@@ -1032,7 +1062,7 @@ class VCDParser:
                     continue
                 if sids is not None and sym not in sids:
                     continue
-                pending[sym] = val
+                pending[sym] = _clamp_overwide_logic_value(val, self.signals[sym])
     
             # Final flush
             if cur_t >= t0:

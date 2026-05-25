@@ -67,3 +67,6 @@ Detailed change logs in [version_notes/](version_notes/).
 
 `neveltyc <neveltyc@gmail.com>`
 
+## License
+
+[MIT](LICENSE)

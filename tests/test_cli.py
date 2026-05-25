@@ -13,15 +13,15 @@ FIX_HANDSHAKE = ROOT / "tests" / "fixtures" / "handshake_trace.vcd"
 FIX_BUS_RANGE = ROOT / "tests" / "fixtures" / "bus_range_trace.vcd"
 FIX_ESCAPED = ROOT / "tests" / "fixtures" / "escaped_trace.vcd"
 
-VERSION = "1.3.6"
+VERSION = "1.3.7"
 LEGACY_SEARCH = False
 SUPPORTS_EDGES = False
 SUPPORTS_HANDSHAKE = False
 SEARCH_T0_MAY_COUNT = False
 SUPPORTS_LIMIT_VERBOSE = True
 DUMP_JSON_SUPPORTED = True
-SUPPORTS_GLOB_LITE = False
-SUPPORTS_SCOPE_FIX = False
+SUPPORTS_GLOB_LITE = True
+SUPPORTS_SCOPE_FIX = True
 
 
 def run_cli(*args):

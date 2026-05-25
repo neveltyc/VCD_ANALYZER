@@ -51,7 +51,7 @@ Examples:
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 """
 
-__version__ = '1.3.6'
+__version__ = '1.3.7'
 
 __author__ = 'neveltyc <neveltyc@gmail.com>'
 import sys
@@ -60,7 +60,6 @@ import re
 import math
 import json
 import argparse
-import fnmatch
 from collections import defaultdict
 
 # -- Time utilities ----------------------------------------------------------
@@ -457,6 +456,29 @@ def _normalize_filter_patterns(value):
     return out
 
 
+def _glob_lite_regex(pattern):
+    """Translate the tool's minimal glob syntax to a compiled regex.
+
+    Only '*' and '?' are special. Everything else — notably '[' and ']' in
+    VCD bus ranges such as data[7:0] — is matched literally. This deliberately
+    avoids fnmatch's character-class syntax so documented filters like
+    '*data[7:0]' match the literal signal path 'tb.data[7:0]'.
+
+    Pattern length and wildcard count are already bounded by
+    _normalize_filter_patterns(), so the generated regex is small and safe.
+    """
+    parts = ['^']
+    for ch in pattern:
+        if ch == '*':
+            parts.append('.*')
+        elif ch == '?':
+            parts.append('.')
+        else:
+            parts.append(re.escape(ch))
+    parts.append('$')
+    return re.compile(''.join(parts))
+
+
 # -- VCD Parser with bit-exploded signal reassembly -------------------------
 
 # IEEE 1364-2005 declaration keywords that introduce a $<kw> ... $end section.
@@ -762,9 +784,12 @@ class VCDParser:
             path = '{}.{}'.format(sc, name) if sc else name
             if sym in self.signals:
                 self.signals[sym]['aliases'].append(path)
+                if sc and sc not in self.signals[sym].setdefault('scopes', []):
+                    self.signals[sym]['scopes'].append(sc)
             else:
                 self.signals[sym] = {
-                    'path': path, 'width': w, 'type': vtype, 'aliases': [path]
+                    'path': path, 'width': w, 'type': vtype,
+                    'aliases': [path], 'scope': sc, 'scopes': [sc] if sc else []
                 }
 
         for (sc, name), bits in bit_groups.items():
@@ -777,7 +802,7 @@ class VCDParser:
             self.signals[sig_id] = {
                 'path': path, 'width': width,
                 'type': bit_types.get((sc, name), 'wire'),
-                'aliases': [path],
+                'aliases': [path], 'scope': sc, 'scopes': [sc] if sc else [],
                 'synthesized': True,    # bit-exploded reassembled bus
                 'raw_bits': len(bits),  # number of $var declarations consumed
             }
@@ -803,38 +828,33 @@ class VCDParser:
         """Return set of sig_ids matching any pattern, or None for all.
 
         Plain patterns use case-insensitive substring matching. Patterns
-        containing shell glob metacharacters (*, ?) use fnmatch-style
-        matching, also case-insensitive. '[' is treated literally because
-        VCD bus ranges like data[7:0] are common signal names.
+        containing '*' or '?' use the tool's minimal glob-lite matching:
+        '*' matches any span, '?' matches one character, and all other
+        characters are literal. This intentionally differs from fnmatch:
+        '[' and ']' are NOT character-class delimiters because VCD bus ranges
+        like data[7:0] are common signal names.
 
         Input is normalized through _normalize_filter_patterns to bound
-        pattern length and wildcard count, defending against fnmatch
-        translation pathologies in Python 3.9.
+        pattern length and wildcard count.
         """
         if not keywords:
             return None
-        pats = [k.lower() for k in _normalize_filter_patterns(keywords) or []]
-        if not pats:
+        raw_pats = [k.lower() for k in _normalize_filter_patterns(keywords) or []]
+        if not raw_pats:
             return None
+        pats = []
+        for pat in raw_pats:
+            if any(ch in pat for ch in '*?'):
+                pats.append(('glob', _glob_lite_regex(pat)))
+            else:
+                pats.append(('substr', pat))
         out = set()
         for sid, info in self.signals.items():
             for path in info['aliases']:
                 pl = path.lower()
                 hit = False
-                for pat in pats:
-                    if any(ch in pat for ch in '*?'):
-                        try:
-                            hit = fnmatch.fnmatchcase(pl, pat)
-                        except re.error:
-                            # fnmatch.translate can produce regex that
-                            # re.compile rejects on older Python versions
-                            # (e.g. some bracket constructs pre-3.9).
-                            # Modern Python normalizes these to never-match
-                            # but we catch defensively so a corrupt filter
-                            # never crashes the tool.
-                            hit = False
-                    else:
-                        hit = pat in pl
+                for kind, pat in pats:
+                    hit = pat.match(pl) is not None if kind == 'glob' else pat in pl
                     if hit:
                         out.add(sid)
                         break
@@ -1761,8 +1781,11 @@ def cmd_info(vcd, args):
         'duration': fmt_time(t_max - t_min, ts) if t_min is not None and t_max is not None else None,
         'duration_ticks': (t_max - t_min) if t_min is not None and t_max is not None else None,
         'duration_h': fmt_time(t_max - t_min, ts) if t_min is not None and t_max is not None else None,
+        # Use declaration-time scope metadata instead of splitting public
+        # paths on '.'. Escaped identifiers may legally contain dots;
+        # path.split('.') would invent fake hierarchy such as tb.\foo.
         'scopes': sorted(set(
-            '.'.join(v['path'].split('.')[:-1]) for v in vcd.signals.values() if '.' in v['path']
+            sc for v in vcd.signals.values() for sc in v.get('scopes', []) if sc
         )),
     }
     if args.json:

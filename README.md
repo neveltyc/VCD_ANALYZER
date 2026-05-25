@@ -1,6 +1,6 @@
         # VCD Analyzer
 
-        Version `1.3.6`
+        Version `1.3.7`
 
         Author: `neveltyc <neveltyc@gmail.com>`
 
@@ -10,9 +10,9 @@
 
         ## Highlights
 
-        - Degrade malformed over-wide logic dumps to explicit unknowns instead of plausible numeric values.
-- Retain the 1.3 search contract while improving corrupted-input behavior.
-- Keep the sanitized regression cases aligned with the over-wide handling rules.
+        - Replace fnmatch-based wildcard matching with a literal-bracket glob-lite matcher.
+- Use declaration-time scope metadata when reporting scopes for escaped identifiers.
+- Keep the latest sanitized condition-search regression suite in place.
 
         ## Commands
 

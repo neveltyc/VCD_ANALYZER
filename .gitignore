@@ -12,3 +12,9 @@ _rebuild_history.py
 _generate_version_notes.py
 publish_releases.ps1
 
+
+# coverage artifacts
+htmlcov/
+.coverage
+coverage.xml
+coverage_report.txt

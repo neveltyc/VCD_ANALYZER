@@ -7,11 +7,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "vcd_analyzer.py"
-FIX_BASIC = ROOT / "tests" / "fixtures" / "basic_trace.vcd"
-FIX_SEARCH = ROOT / "tests" / "fixtures" / "search_trace.vcd"
-FIX_HANDSHAKE = ROOT / "tests" / "fixtures" / "handshake_trace.vcd"
-FIX_BUS_RANGE = ROOT / "tests" / "fixtures" / "bus_range_trace.vcd"
-FIX_ESCAPED = ROOT / "tests" / "fixtures" / "escaped_trace.vcd"
+FIX_BASIC = ROOT / "verify" / "fixtures" / "basic_trace.vcd"
+FIX_SEARCH = ROOT / "verify" / "fixtures" / "search_trace.vcd"
+FIX_HANDSHAKE = ROOT / "verify" / "fixtures" / "handshake_trace.vcd"
+FIX_BUS_RANGE = ROOT / "verify" / "fixtures" / "bus_range_trace.vcd"
+FIX_ESCAPED = ROOT / "verify" / "fixtures" / "escaped_trace.vcd"
 
 VERSION = "1.3.9"
 LEGACY_SEARCH = False

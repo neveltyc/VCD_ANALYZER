@@ -87,8 +87,8 @@ ritual &mdash; drop it anywhere with Python 3.9+ and it works.
 
 ```
 vcd_analyzer.py       The tool (single file, stdlib only)
-tests/                unittest regression suite &mdash; 16 tests, 0 failures
-tests/fixtures/       Sanitized VCD waveforms (no private paths)
+verify/                unittest regression suite &mdash; 71 tests, 0 failures
+verify/fixtures/       Sanitized VCD waveforms (no private paths)
 version_notes/        Per-release change logs (33 releases)
 archive/              Snapshots of every published version
 ```

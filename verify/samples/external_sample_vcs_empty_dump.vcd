@@ -1,0 +1,23 @@
+$date
+	Sun Oct 29 22:26:57 2023
+$end
+
+$version
+	Synopsys VCS version S-2021.09
+$end
+
+$timescale
+	1ns
+$end
+
+$comment Csum: 1 1cfe7f6c7f2fa869 $end
+
+
+$scope module tb $end
+$upscope $end
+
+$enddefinitions $end
+
+#0
+$dumpvars
+$end

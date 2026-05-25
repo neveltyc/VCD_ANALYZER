@@ -85,8 +85,8 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 ```
 vcd_analyzer.py       核心工具（单文件，仅依赖标准库）
-tests/                unittest 回归测试套件 —— 16 个用例，0 失败
-tests/fixtures/       脱敏 VCD 测试波形（不含任何私有路径）
+verify/                unittest 回归测试套件 —— 71 个用例，0 失败
+verify/fixtures/       脱敏 VCD 测试波形（不含任何私有路径）
 version_notes/        每个版本的变更说明（33 个版本）
 archive/              所有已发布版本的快照
 ```

@@ -124,6 +124,16 @@ python -m unittest discover -s verify -p "test_cli.py"
 Covers helpers, parser internals, command functions, text/JSON modes, CLI
 subprocess smoke, and three external real-world VCD samples.
 
+## Agent skill
+
+This repository includes a [skill/SKILL.md](skill/SKILL.md) for AI coding agents
+(Codex, Claude Code, etc.). Install it directly from this repo and your agent
+will know how to use all seven commands, pick the right one for each task,
+parse JSON output, and follow proven debug workflows.
+
+The skill covers the full command reference, decision tree, five workflow
+patterns, condition syntax, error recovery, and environment variable tuning.
+
 ## Version history
 
 Full per-version notes live in [version_notes/](version_notes/).

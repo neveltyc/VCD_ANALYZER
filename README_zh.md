@@ -122,6 +122,15 @@ python -m unittest discover -s verify -p "test_cli.py"
 覆盖 helpers、parser 内部、命令函数、文本/JSON 输出模式、CLI subprocess、
 以及三个真实外部 VCD 样本。
 
+
+## Agent 技能
+
+仓库内置了 [skill/SKILL.md](skill/SKILL.md)，专为 AI 编程 Agent 设计（Codex、Claude Code 等）。
+直接从仓库安装即可 — Agent 会自动掌握全部七个命令的用法、根据任务选择正确的命令、
+解析 JSON 输出，并遵循成熟的调试工作流。
+
+技能涵盖完整命令参考、决策树、五个工作流模式、条件语法、错误恢复和环境变量调优。
+
 ## 版本历史
 
 详细变更见 [version_notes/](version_notes/)。

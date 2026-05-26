@@ -10,7 +10,7 @@
   <img alt="Version" src="https://img.shields.io/badge/版本-1.3.9-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/测试-16/16%20通过-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/测试-41/41%20通过-22aa55?style=flat-square">
 </p>
 
 ---
@@ -85,8 +85,9 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 ```
 vcd_analyzer.py       核心工具（单文件，仅依赖标准库）
-verify/                unittest 回归测试套件 —— 71 个用例，0 失败
-verify/fixtures/       脱敏 VCD 测试波形（不含任何私有路径）
+verify/               pytest + unittest 测试套件 —— 41 个用例，0 失败
+verify/fixtures/      脱敏 VCD 测试波形（不含任何私有路径）
+verify/samples/       真实 GitHub VCD 样本，用于冒烟测试
 version_notes/        每个版本的变更说明（33 个版本）
 archive/              所有已发布版本的快照
 ```
@@ -94,8 +95,15 @@ archive/              所有已发布版本的快照
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"
+# 完整 pytest 套件（需安装 pytest）
+python -m pytest verify/ -v
+
+# 仅 unittest（标准库，无需额外安装）
+python -m unittest discover -s verify -p "test_cli.py"
 ```
+
+覆盖 helpers、parser 内部、命令函数、文本/JSON 输出模式、CLI subprocess、
+以及三个真实外部 VCD 样本。
 
 ## 版本历史
 

@@ -10,7 +10,7 @@
   <img alt="Version" src="https://img.shields.io/badge/version-1.3.9-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-16%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-41/41%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -87,8 +87,9 @@ ritual &mdash; drop it anywhere with Python 3.9+ and it works.
 
 ```
 vcd_analyzer.py       The tool (single file, stdlib only)
-verify/                unittest regression suite &mdash; 71 tests, 0 failures
-verify/fixtures/       Sanitized VCD waveforms (no private paths)
+verify/               pytest + unittest suite — 41 tests, 0 failures
+verify/fixtures/      Sanitized VCD waveforms (no private paths)
+verify/samples/       Real-world GitHub VCD fixtures for smoke testing
 version_notes/        Per-release change logs (33 releases)
 archive/              Snapshots of every published version
 ```
@@ -96,8 +97,15 @@ archive/              Snapshots of every published version
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"
+# Full pytest suite (requires pytest)
+python -m pytest verify/ -v
+
+# unittest only (stdlib, no extra installs)
+python -m unittest discover -s verify -p "test_cli.py"
 ```
+
+Covers helpers, parser internals, command functions, text/JSON modes, CLI
+subprocess smoke, and three external real-world VCD samples.
 
 ## Version history
 

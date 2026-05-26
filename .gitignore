@@ -1,20 +1,21 @@
 .pytest_cache/
 __pycache__/
-archive/
 ieeestand1364-2005/
 tmp*/
 _audit_all_versions/
-vcd_analyzer_1_3_6.py
-vcd_analyzer_1_3_7.py
-vcd_analyzer_1_3_6_with_tests.zip
 _fixture_*.vcd
 _rebuild_history.py
 _generate_version_notes.py
 publish_releases.ps1
 
+# archive: only source files, not zip packages
+archive/*.zip
+archive/VERSION_INDEX.md
 
 # coverage artifacts
 htmlcov/
 .coverage
 coverage.xml
 coverage_report.txt
+latest_run.log
+

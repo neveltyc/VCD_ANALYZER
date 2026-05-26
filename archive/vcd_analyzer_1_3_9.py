@@ -56,7 +56,7 @@ Notes:
   "no match" result.
 """
 
-__version__ = '1.3.10'
+__version__ = '1.3.9'
 
 import sys
 import os
@@ -1640,23 +1640,16 @@ def _event_groups(vcd, t0, t1, sids):
 def _summary_rows(vcd, t0, t1, sids):
     """Return (rows, counts) for window summary.
 
-    Baseline captures state up to init_boundary: t=0 when the window starts
-    at 0 (so $dumpvars initialization is part of the baseline, not counted
-    as changes), or t0-1 when the window starts later (so value_changes
-    exactly at --begin are counted as in-window events, fixing the boundary
-    black-hole where transitions at the window edge were silently dropped).
-
-    Static means known in baseline and no value changes inside the window.
-    Undefined means selected but not known in baseline and no value changes
-    inside the window. No unknown values are invented.
+    Static means known at t0 and no value changes after t0 inside the window.
+    Undefined means selected but not known at t0 and no value changes inside
+    the window. No unknown values are invented.
 
     For 1-bit signals, rise/fall counts are reported for clean 0->1 and 1->0
     transitions only. x/z-related transitions still count as changes, but not
     as rises/falls.
     """
     selected = _selected_sids(vcd, sids)
-    init_boundary = 0 if t0 == 0 else t0 - 1
-    initial = _build_snapshot(vcd, init_boundary, selected)
+    initial = _build_snapshot(vcd, t0, selected)
     stats = {}
     for sid, val in initial.items():
         info = vcd.signals[sid]
@@ -1667,7 +1660,7 @@ def _summary_rows(vcd, t0, t1, sids):
             'fall_count': 0 if info['width'] == 1 else None,
         }
     for t, group in _event_groups(vcd, t0, t1, selected):
-        if t <= init_boundary:
+        if t <= t0:
             continue
         for sid, val in group:
             info = vcd.signals[sid]

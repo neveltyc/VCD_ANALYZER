@@ -51,6 +51,23 @@ python vcd_analyzer.py snapshot sim.vcd --at 17.55us --filter state,init_done
 python vcd_analyzer.py summary sim.vcd --filter dll_*
 ```
 
+## Install
+
+Single file, no dependencies, Python 3.9+.
+
+```bash
+# Latest
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
+
+# Pinned version (recommended — avoids compatibility surprises from main)
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.9/vcd_analyzer.py -o vcd_analyzer.py
+
+# Verify
+python vcd_analyzer.py --version
+```
+
+No pip, no venv, no PyPI. Works anywhere curl and Python 3.9+ are available — CI containers, EDA servers, Docker builds, agent toolchains.
+
 ## Commands
 
 | Command | What it does |
@@ -124,4 +141,3 @@ Full per-version notes live in [version_notes/](version_notes/).
 MIT &mdash; see [LICENSE](LICENSE). &copy; 2026 neveltyc
 
 [中文说明](README_zh.md)
-

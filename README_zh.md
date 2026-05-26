@@ -49,6 +49,23 @@ python vcd_analyzer.py snapshot sim.vcd --at 17.55us --filter state,init_done
 python vcd_analyzer.py summary sim.vcd --filter dll_*
 ```
 
+## 安装
+
+单文件，零依赖，Python 3.9+。
+
+```bash
+# 最新版
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
+
+# 锁定版本（推荐，避免 main 分支更新破坏兼容性）
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.9/vcd_analyzer.py -o vcd_analyzer.py
+
+# 验证
+python vcd_analyzer.py --version
+```
+
+无需 pip、无需虚拟环境、无需 PyPI。只要有 curl 和 Python 3.9+ 就能用——适合 CI 容器、EDA 服务器、Docker 构建、Agent 工具链。
+
 ## 命令一览
 
 | 命令 | 功能 |
@@ -122,4 +139,3 @@ python -m unittest discover -s verify -p "test_cli.py"
 MIT —— 详见 [LICENSE](LICENSE)。&copy; 2026 neveltyc
 
 [English](README.md)
-

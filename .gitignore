@@ -1,19 +1,13 @@
-.pytest_cache/
+# Python
 __pycache__/
-ieeestand1364-2005/
-tmp*/
-_audit_all_versions/
-_fixture_*.vcd
-_rebuild_history.py
-_generate_version_notes.py
-publish_releases.ps1
+.pytest_cache/
+*.pyc
 
-# coverage artifacts
+# Coverage
 htmlcov/
 .coverage
 coverage.xml
-coverage_report.txt
-latest_run.log
 
+# Private dev files
 AGENT.md
 GIT_SOP.md

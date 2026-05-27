@@ -105,7 +105,7 @@ vcd_analyzer.py       核心工具（单文件，仅依赖标准库）
 verify/               pytest + unittest 测试套件 —— 41 个用例，0 失败
 verify/fixtures/      脱敏 VCD 测试波形（不含任何私有路径）
 verify/samples/       真实 GitHub VCD 样本，用于冒烟测试
-version_notes/        每个版本的变更说明（33 个版本）
+CHANGELOG.md          简洁变更日志，含详细发行说明链接
 ```
 
 ## 测试
@@ -132,7 +132,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 ## 版本历史
 
-详细变更见 [version_notes/](version_notes/)。
+详细变更见 [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) 页面。快速概览见 [CHANGELOG.md](CHANGELOG.md)。
 
 | 版本 | 亮点 |
 |:------|:-----|

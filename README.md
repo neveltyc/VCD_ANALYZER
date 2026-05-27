@@ -107,7 +107,7 @@ vcd_analyzer.py       The tool (single file, stdlib only)
 verify/               pytest + unittest suite — 41 tests, 0 failures
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
-version_notes/        Per-release change logs (33 releases)
+CHANGELOG.md          Compact changelog with links to detailed release notes
 ```
 
 ## Tests
@@ -135,7 +135,7 @@ patterns, condition syntax, error recovery, and environment variable tuning.
 
 ## Version history
 
-Full per-version notes live in [version_notes/](version_notes/).
+Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) page. See [CHANGELOG.md](CHANGELOG.md) for a quick overview.
 
 | Version | Highlight |
 |:--------|:----------|

@@ -1,6 +1,6 @@
 $timescale 1ns $end
 $scope module tb $end
-$var wire 1 ! oo.bar $end
+$var wire 1 ! \foo.bar $end
 $upscope $end
 $enddefinitions $end
 #0

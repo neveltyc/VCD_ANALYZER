@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.9-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.10-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
   <img alt="Tests" src="https://img.shields.io/badge/tests-41/41%20passed-22aa55?style=flat-square">
@@ -60,7 +60,7 @@ Single file, no dependencies, Python 3.9+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned version (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.9/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.10/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
 python vcd_analyzer.py --version
@@ -140,6 +140,7 @@ Full per-version notes live in [version_notes/](version_notes/).
 
 | Version | Highlight |
 |:--------|:----------|
+| `1.3.10` | Fix summary begin-boundary transition counting |
 | `1.3.9` | Eliminate duplicated value-change parsing |
 | `1.3.8` | Harden input validation &amp; error reporting |
 | `1.3.7` | Literal bus-range globs &amp; escaped-scope reporting |

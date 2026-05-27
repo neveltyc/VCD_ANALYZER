@@ -108,7 +108,6 @@ verify/               pytest + unittest suite — 41 tests, 0 failures
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
 version_notes/        Per-release change logs (33 releases)
-archive/              Snapshots of every published version
 ```
 
 ## Tests

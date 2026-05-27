@@ -106,7 +106,6 @@ verify/               pytest + unittest 测试套件 —— 41 个用例，0 失
 verify/fixtures/      脱敏 VCD 测试波形（不含任何私有路径）
 verify/samples/       真实 GitHub VCD 样本，用于冒烟测试
 version_notes/        每个版本的变更说明（33 个版本）
-archive/              所有已发布版本的快照
 ```
 
 ## 测试

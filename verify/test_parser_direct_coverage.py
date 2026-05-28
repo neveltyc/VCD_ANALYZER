@@ -78,3 +78,101 @@ def test_resource_limits(monkeypatch, tmp_path):
     p2 = write_vcd(tmp_path, '$timescale 1ns $end\n$scope module tb $end\n$var wire 1 ! a $end\n$upscope $end\n$enddefinitions $end #0 0! #1 1!\n')
     with pytest.raises(va._VCDResourceError):
         va.VCDParser(str(p2))
+
+
+def test_iter_events_filter_fast_path_keeps_selected_vector_and_real(tmp_path):
+    p = write_vcd(
+        tmp_path,
+        minimal_vcd(
+            "$var wire 8 ! keep_vec $end\n"
+            "$var wire 8 \" skip_vec $end\n"
+            "$var real 64 # keep_real $end\n"
+            "$var real 64 $ skip_real $end\n",
+            "#0\n"
+            "b00000001 !\n"
+            "b00000010 \"\n"
+            "r1.5 #\n"
+            "r2.5 $\n"
+            "#10\n"
+            "b00000011 !\n"
+            "r3.5 #\n"
+            "b00000100 \"\n",
+        ),
+    )
+    v = va.VCDParser(str(p))
+    sids = v.match("keep_vec,keep_real")
+    events = [(t, v.signals[sid]["path"], val) for t, sid, val in v.iter_events(0, None, sids)]
+    assert events == [
+        (0, "tb.keep_vec", "00000001"),
+        (0, "tb.keep_real", "1.5"),
+        (10, "tb.keep_vec", "00000011"),
+        (10, "tb.keep_real", "3.5"),
+    ]
+
+
+def test_iter_events_filter_fast_path_keeps_synthesized_bus_updates(tmp_path):
+    p = write_vcd(
+        tmp_path,
+        minimal_vcd(
+            "$var wire 1 ! bus [0] $end\n"
+            "$var wire 1 \" bus [1] $end\n"
+            "$var wire 1 # other $end\n",
+            "#0\n"
+            "0!\n"
+            "1\"\n"
+            "0#\n"
+            "#10\n"
+            "1!\n"
+            "1#\n",
+        ),
+    )
+    v = va.VCDParser(str(p))
+    sids = v.match("bus[1:0]")
+    events = [(t, v.signals[sid]["path"], val) for t, sid, val in v.iter_events(0, None, sids)]
+    assert events == [
+        (0, "tb.bus[1:0]", "10"),
+        (10, "tb.bus[1:0]", "11"),
+    ]
+
+
+def test_scan_time_range_handles_initial_dumpvars_without_leading_timestamp(tmp_path):
+    p = write_vcd(
+        tmp_path,
+        minimal_vcd(
+            "$var wire 1 ! sig $end\n",
+            "$dumpvars\n"
+            "1!\n"
+            "$end\n"
+            "#10\n"
+            "0!\n",
+        ),
+    )
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 10)
+
+
+def test_scan_time_range_handles_initial_dumpvars_only(tmp_path):
+    p = write_vcd(
+        tmp_path,
+        minimal_vcd(
+            "$var wire 1 ! sig $end\n",
+            "$dumpvars\n"
+            "1!\n"
+            "$end\n",
+        ),
+    )
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 0)
+
+
+def test_scan_time_range_finds_last_timestamp_in_large_tail(tmp_path):
+    body = ["#0", "0!"]
+    for i in range(1, 6000):
+        body.append(f"#{i}")
+        body.append("1!" if i % 2 else "0!")
+    p = write_vcd(
+        tmp_path,
+        minimal_vcd("$var wire 1 ! sig $end\n", "\n".join(body) + "\n"),
+    )
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 5999)

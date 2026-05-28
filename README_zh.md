@@ -7,10 +7,10 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/版本-1.3.10-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/版本-1.3.11-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/测试-41/41%20通过-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/测试-52/52%20通过-22aa55?style=flat-square">
 </p>
 
 ---
@@ -57,7 +57,7 @@ python vcd_analyzer.py summary sim.vcd --filter dll_*
 # 最新版
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
-# 锁定版本（推荐，避免 main 分支更新破坏兼容性）
+# 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.10/vcd_analyzer.py -o vcd_analyzer.py
 
 # 验证
@@ -65,6 +65,8 @@ python vcd_analyzer.py --version
 ```
 
 无需 pip、无需虚拟环境、无需 PyPI。只要有 curl 和 Python 3.9+ 就能用——适合 CI 容器、EDA 服务器、Docker 构建、Agent 工具链。
+
+`main` 分支当前对应的是开发中的 `1.3.11`。在下一次正式打 tag 之前，最新已发布版本仍然是 `v1.3.10`。
 
 ## 命令一览
 
@@ -102,7 +104,7 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 ```
 vcd_analyzer.py       核心工具（单文件，仅依赖标准库）
-verify/               pytest + unittest 测试套件 —— 41 个用例，0 失败
+verify/               pytest + unittest 测试套件 —— 52 个用例，0 失败
 verify/fixtures/      脱敏 VCD 测试波形（不含任何私有路径）
 verify/samples/       真实 GitHub VCD 样本，用于冒烟测试
 CHANGELOG.md          简洁变更日志，含详细发行说明链接
@@ -136,6 +138,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 | 版本 | 亮点 |
 |:------|:-----|
+| `1.3.11` | 加速过滤迭代与大文件时间范围扫描 |
 | `1.3.10` | 修复 summary 边界过渡计数 |
 | `1.3.9` | 消除数据扫描路径中的重复解析代码 |
 | `1.3.8` | 加固输入校验和错误报告 |

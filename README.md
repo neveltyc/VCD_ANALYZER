@@ -7,10 +7,10 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.10-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.11-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-41/41%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-52/52%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -59,7 +59,7 @@ Single file, no dependencies, Python 3.9+.
 # Latest
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
-# Pinned version (recommended — avoids compatibility surprises from main)
+# Pinned release tag (recommended — avoids compatibility surprises from main)
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.10/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
@@ -67,6 +67,8 @@ python vcd_analyzer.py --version
 ```
 
 No pip, no venv, no PyPI. Works anywhere curl and Python 3.9+ are available — CI containers, EDA servers, Docker builds, agent toolchains.
+
+`main` currently tracks the in-flight `1.3.11` development version. The latest published release tag remains `v1.3.10` until the next tag is cut.
 
 ## Commands
 
@@ -104,7 +106,7 @@ ritual &mdash; drop it anywhere with Python 3.9+ and it works.
 
 ```
 vcd_analyzer.py       The tool (single file, stdlib only)
-verify/               pytest + unittest suite — 41 tests, 0 failures
+verify/               pytest + unittest suite — 52 tests, 0 failures
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
 CHANGELOG.md          Compact changelog with links to detailed release notes
@@ -139,6 +141,7 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 
 | Version | Highlight |
 |:--------|:----------|
+| `1.3.11` | Faster filtered iteration and large-file time-range scanning |
 | `1.3.10` | Fix summary begin-boundary transition counting |
 | `1.3.9` | Eliminate duplicated value-change parsing |
 | `1.3.8` | Harden input validation &amp; error reporting |

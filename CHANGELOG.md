@@ -3,6 +3,14 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) page.
 
+## [1.3.11] - Unreleased
+
+Speed up filtered event iteration and large-file time-range discovery
+
+- add a filtered `iter_events()` fast path so unselected scalar/vector/real value changes can be skipped before full parsing
+- rework `scan_time_range()` into a forward-min / backward-max strategy to make `info` substantially faster on large VCDs
+- preserve CLI surface and existing query semantics; this release is an internal performance and maintainability update
+
 ## [1.3.10](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.10) - 2026-05-27
 
 Fix `summary` begin-boundary transition counting

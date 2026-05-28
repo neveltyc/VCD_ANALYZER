@@ -3,6 +3,10 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) page.
 
+## [1.3.13](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.13) - 2026-05-29
+
+Speed up the value-change hot path for large VCDs (roughly 2x on summary, snapshot, and compare over a 43 MB trace) with no change in output. Replace per-character `all()`/`any()` 4-state validation with C-level `str.translate`, flatten the data-section tokenizer to walk per-line token lists by index instead of resuming a per-token generator, inline the common 1-bit scalar value-change, and defer the over-wide 4-state scan in `fmt_val`/`_clamp_overwide_logic_value` behind a cheap width guard. `cmd_dump` now memoizes the formatted timestamp across events that share it.
+
 ## [1.3.12](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.12) - 2026-05-28
 
 Replace double-scan paths with single-pass iter_events in summary, compare, and search. Refine summary_rows baseline phase to avoid redundant stats-dict creation, using a lightweight baseline dict with lazy stats dispatch.

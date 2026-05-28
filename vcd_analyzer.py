@@ -56,7 +56,7 @@ Notes:
   "no match" result.
 """
 
-__version__ = '1.3.12'
+__version__ = '1.3.13'
 
 import sys
 import os
@@ -134,6 +134,14 @@ _REAL_RE = re.compile(
     r'^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$'
 )
 _REAL_MAX_LEN = 64  # Defensive cap: %.16g + sign + exponent fits well under this
+
+# Fast 4-state validation tables. str.translate() runs entirely in C, so
+# "delete every allowed character, then check for an empty remainder" is the
+# fastest stdlib test for "are all characters drawn from this set?". This
+# replaces per-character all()/any() generator scans on the hot value-change
+# path, where they accounted for tens of millions of Python-level iterations.
+_DEL_4STATE_LOWER = {ord(c): None for c in '01xz'}     # canonical lowercase
+_DEL_4STATE_CI = {ord(c): None for c in '01xXzZ'}      # raw VCD, case-insensitive
 
 # Extended VCD port state character → 4-state mapping (IEEE 1364-2005 18.4.3.1).
 # Strengths (driver levels 0-7) are not exposed; for RTL debug the 4-state value
@@ -337,9 +345,9 @@ def fmt_time(ts, ts_sec):
     sec = ts * ts_sec
     for u in ('fs', 'ps', 'ns', 'us', 'ms', 's'):
         scaled = sec / _UNITS[u]
-        if abs(scaled) < 1000 or u == 's':
-            return '{:g}{}'.format(scaled, u)
-    return '{:g}s'.format(sec)
+        if -1000.0 < scaled < 1000.0 or u == 's':
+            return f'{scaled:g}{u}'
+    return f'{sec:g}s'
 
 
 # -- Value formatting --------------------------------------------------------
@@ -365,8 +373,10 @@ def fmt_val(value, info):
     # Malformed VCD may dump more 4-state bits than the declared width
     # (for example an over-long extended-VCD port state). Do not truncate
     # to the LSBs: that silently fabricates a plausible numeric value.
-    # Show explicit unknowns instead.
-    if _is_4state_bits(value) and len(value) > width:
+    # Show explicit unknowns instead. The over-wide case is rare, so the
+    # cheap length guard runs first and skips the per-character scan for the
+    # overwhelming majority of (in-width) values.
+    if len(value) > width and _is_4state_bits(value):
         value = 'x' * width
     if width == 1:
         return value
@@ -381,7 +391,7 @@ def fmt_val(value, info):
     try:
         d = int(value, 2)
         hw = max((width + 3) // 4, 1)
-        return '{} (0x{})'.format(d, format(d, 'x').zfill(hw))
+        return f'{d} (0x{format(d, "x").zfill(hw)})'
     except ValueError:
         return 'b' + value
 
@@ -415,14 +425,18 @@ def _clamp_overwide_logic_value(value, info):
     turn corrupt input into a plausible-looking numeric value. Instead,
     degrade to all-x at the declared width so downstream dump/snapshot/search
     sees an explicit unknown.
+
+    Hot path: this runs once per standalone value_change. The over-wide case
+    is rare, so the cheap ``len(value) <= width`` guard short-circuits the
+    overwhelming majority of calls before the per-character 4-state scan.
     """
+    width = info.get('width')
+    if width is None or len(value) <= width:
+        return value
     vtype = info.get('type', 'wire')
     if vtype in ('real', 'realtime', 'event'):
         return value
-    width = info.get('width')
-    if width is None:
-        return value
-    if _is_4state_bits(value) and len(value) > width:
+    if _is_4state_bits(value):
         return 'x' * width
     return value
 
@@ -883,6 +897,26 @@ class VCDParser:
                 for t in line.split():
                     yield t
 
+    def _data_token_lists(self):
+        """Yield successive non-empty token lists from the data section.
+
+        One list per physical line, with the buffered initial tokens (those
+        that trailed ``$enddefinitions`` on the same readline chunk) yielded
+        first. iter_events() walks each list by index instead of pulling one
+        token at a time through a generator; on large files the per-token
+        generator resume was a dominant tokenizer cost. Whitespace splitting
+        and ordering are identical to _data_tokens(), so the token stream the
+        parser observes is unchanged.
+        """
+        if self._initial_tokens:
+            yield self._initial_tokens
+        with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
+            f.seek(self._data_offset)
+            for line in f:
+                toks = line.split()
+                if toks:
+                    yield toks
+
     def _is_structural_token(self, tok):
         """Return True when tok is structural rather than an identifier_code.
 
@@ -923,7 +957,7 @@ class VCDParser:
 
         if first in 'bB':
             bits = tok[1:]
-            if not bits or any(c not in '01xXzZ' for c in bits):
+            if not bits or bits.translate(_DEL_4STATE_CI):
                 return None
             sym = next_token()
             if self._is_structural_token(sym):
@@ -1000,13 +1034,17 @@ class VCDParser:
             pending.clear()
             return items
 
-        # Pushback-capable token stream. Lets us peek the next token in
-        # b/r value_change branches and refuse it if it looks structural
-        # (timestamp or section keyword) — otherwise malformed inputs
-        # like 'b1010\n#10\n1!' would silently consume #10 as the
-        # identifier_code and corrupt the timeline.
-        raw = self._data_tokens()
+        # Flattened tokenizer. The data section is consumed as a sequence of
+        # per-line token *lists* (self._data_token_lists); the main loop reads
+        # the current list by index, so only line boundaries pay a next() call
+        # — the per-token generator resume that dominated tokenizer time on
+        # large files is gone. Pushback is honored on every read, so the b/r/p
+        # look-ahead and $-section skipping keep their exact prior semantics.
+        list_iter = self._data_token_lists()
         pushback = []
+        toks = ()
+        ntoks = 0
+        ti = 0
         # Replay-local bit state. iter_events() must be pure with respect
         # to parser metadata: compare/search/summary/snapshot may replay
         # the same VCDParser multiple times and in non-monotonic order.
@@ -1033,30 +1071,55 @@ class VCDParser:
             bit_state = {gid: self._bit_state_template[gid][:] for gid in needed_gids}
 
         def _next():
-            return pushback.pop() if pushback else next(raw, None)
+            nonlocal toks, ntoks, ti
+            if pushback:
+                return pushback.pop()
+            while ti >= ntoks:
+                nl = next(list_iter, None)
+                if nl is None:
+                    return None
+                toks = nl
+                ntoks = len(nl)
+                ti = 0
+            tok = toks[ti]
+            ti += 1
+            return tok
 
         try:
             while True:
-                tok = _next()
-                if tok is None:
-                    break
-                # Top-level: any unknown $keyword starts a section ending at
-                # $end. This is safer than passing the body through as value
-                # changes — '$bogus 1! $end' must not pollute the waveform.
-                # Known wrappers ($dumpvars etc) are pass-through (their body
-                # IS value_changes per 18.2.3.9-12).
-                if tok == '$end':
-                    continue
-                if tok in _SIM_KEYWORDS:
-                    continue
-                if tok.startswith('$'):
-                    # $comment, $vcdclose, $bogus, ...: drop body to $end
-                    for t in raw:
-                        if t == '$end':
+                # Inline token fetch (hot path): a direct index read with no
+                # function call for the common case; _next() is reserved for
+                # the parser's b/r/p look-ahead and section skipping.
+                if pushback:
+                    tok = pushback.pop()
+                elif ti < ntoks:
+                    tok = toks[ti]
+                    ti += 1
+                else:
+                    nl = next(list_iter, None)
+                    if nl is None:
+                        break
+                    toks = nl
+                    ntoks = len(nl)
+                    tok = toks[0]
+                    ti = 1
+
+                c0 = tok[0]
+                # Top-level $keyword. Known wrappers ($dumpvars etc) and a bare
+                # $end are pass-through markers; any other $section's body is
+                # dropped to its $end so '$bogus 1! $end' can't pollute the
+                # waveform. Gating on the first character keeps non-$ tokens
+                # (the overwhelming majority) out of these comparisons.
+                if c0 == '$':
+                    if tok == '$end' or tok in _SIM_KEYWORDS:
+                        continue
+                    while True:
+                        t = _next()
+                        if t is None or t == '$end':
                             break
                     continue
-    
-                if tok.startswith('#') and len(tok) > 1 and tok[1].isdigit():
+
+                if c0 == '#' and len(tok) > 1 and tok[1].isdigit():
                     new_t = _parse_vcd_timestamp_token(tok)
                     if new_t is None:
                         # Malformed (e.g. '#1.5'); silently skip per round-7 policy.
@@ -1068,20 +1131,24 @@ class VCDParser:
                     if t1 is not None and cur_t > t1:
                         return
                     continue
-    
-                # ---- Fast-path filter: skip value changes for unneeded signals ----
-                # Check the identifier_code BEFORE calling _consume_value_change().
-                # For 1-bit VCs (90%+ of all tokens), the identifier is tok[1:].
-                # For b/r multi-token VCs, peek the next token (the identifier).
-                # This avoids the full parsing overhead for 99.99% of tokens when
-                # --filter selects a handful of signals out of 200K+.
-                if sids is not None:
-                    c = tok[0]
-                    if c in '01xzXZ' and len(tok) >= 2:
-                        sym = tok[1:]
-                        if sym not in sids and sym not in bit_map:
-                            continue
-                    elif c in 'bBrR':
+
+                # ---- Value change ----
+                # The 1-bit scalar form (a single leading 0/1/x/z/X/Z followed
+                # by the identifier_code) is by far the most common token, so it
+                # is parsed inline here without a helper call. b/r/p forms keep
+                # going through _consume_value_change so the malformed-token
+                # validation rules live in exactly one place.
+                if c0 in '01xXzZ' and len(tok) > 1:
+                    sym = tok[1:]
+                    # Fast-path filter: drop unneeded signals before any work.
+                    if sids is not None and sym not in sids and sym not in bit_map:
+                        continue
+                    val = c0 if c0 in '01xz' else c0.lower()
+                elif c0 in 'bBrRp':
+                    # Fast-path filter peek for b/r (identifier is the next
+                    # token). p is left to the standalone-stage filter, matching
+                    # prior behavior.
+                    if sids is not None and c0 in 'bBrR':
                         sym_tok = _next()
                         if sym_tok is not None and not self._is_structural_token(sym_tok):
                             if sym_tok not in sids and sym_tok not in bit_map:
@@ -1089,26 +1156,25 @@ class VCDParser:
                             pushback.append(sym_tok)  # needed — put back for parser
                         elif sym_tok is not None:
                             pushback.append(sym_tok)
-
-                # Shared value_change parser. Keeping b/r/p validation in one
-                # helper prevents scan_time_range() and iter_events() from
-                # drifting apart when malformed-token rules are adjusted.
-                parsed = self._consume_value_change(tok, _next, pushback)
-                if parsed is None:
+                    parsed = self._consume_value_change(tok, _next, pushback)
+                    if parsed is None:
+                        continue
+                    sym, val = parsed
+                else:
+                    # Not a value_change opener (e.g. stray '#', bare 'b').
                     continue
-                sym, val = parsed
-    
+
                 # Catch-up before t0: update bit_state only, don't emit.
                 # Standalone state is owned by callers (e.g. _build_snapshot
                 # accumulates it from yielded events), so nothing to do here
                 # for the standalone case — the continue is correct.
                 if cur_t < t0:
                     if sym in bit_map:
-                        bit_val = val if _is_4state_bits(val) and len(val) == 1 else 'x'
+                        bit_val = val if len(val) == 1 and _is_4state_bits(val) else 'x'
                         for gid, idx in bit_map[sym]:
                             bit_state[gid][idx] = bit_val
                     continue
-    
+
                 # Bit-exploded signal: aggregate into virtual bus value(s).
                 # If the same identifier_code drives multiple synthesized buses
                 # (via aliased parent declarations), each gets its own event.
@@ -1121,12 +1187,12 @@ class VCDParser:
                 # agent would see clk as a flat line. Fall through to the
                 # standalone block so both signals update on the same value_change.
                 if sym in bit_map:
-                    bit_val = val if _is_4state_bits(val) and len(val) == 1 else 'x'
+                    bit_val = val if len(val) == 1 and _is_4state_bits(val) else 'x'
                     for gid, idx in bit_map[sym]:
                         bit_state[gid][idx] = bit_val
                         if sids is None or gid in sids:
                             pending[gid] = ''.join(reversed(bit_state[gid]))
-    
+
                 # Standalone signal (may run after the bit-bus branch above when
                 # the sym serves both roles).
                 if sym not in self.signals:
@@ -1134,13 +1200,13 @@ class VCDParser:
                 if sids is not None and sym not in sids:
                     continue
                 pending[sym] = _clamp_overwide_logic_value(val, self.signals[sym])
-    
+
             # Final flush
             if cur_t >= t0:
                 for sid, val in _flush():
                     yield cur_t, sid, val
         finally:
-            close = getattr(raw, 'close', None)
+            close = getattr(list_iter, 'close', None)
             if close is not None:
                 close()
 
@@ -1421,7 +1487,7 @@ def _parse_target_value(text):
 
 
 def _is_4state_bits(text):
-    return text is not None and text != '' and all(c in '01xz' for c in text)
+    return bool(text) and not text.translate(_DEL_4STATE_LOWER)
 
 
 def _left_extend_bits(bits, width):
@@ -1729,6 +1795,7 @@ def _summary_rows(vcd, t0, t1, sids):
             'prev': init_val,
             'rise_count': 0 if is_scalar else None,
             'fall_count': 0 if is_scalar else None,
+            'scalar': is_scalar,
         }
 
     for t, sid, val in vcd.iter_events(0, t1, selected):
@@ -1744,8 +1811,7 @@ def _summary_rows(vcd, t0, t1, sids):
 
         s = stats[sid]
         prev = s['prev']
-        info = vcd.signals[sid]
-        if info['width'] == 1:
+        if s['scalar']:
             if prev == '0' and val == '1':
                 s['rise_count'] += 1
             elif prev == '1' and val == '0':
@@ -1912,15 +1978,25 @@ def cmd_dump(vcd, args):
     total = 0
     truncated = False
     events = []
+    verbose = getattr(args, 'verbose', False)
+    # Many value_changes share one timestamp, so memoize the formatted time
+    # across consecutive events. fmt_time() depends only on (t, ts), so this
+    # is output-identical while collapsing ~one fmt_time call per timestamp
+    # instead of one per event.
+    last_t = object()
+    last_th = None
     for t, sid, val in vcd.iter_events(t0, t1, sids):
         total += 1
         if limit != 0 and len(events) >= limit:
             truncated = True
             break
         info = vcd.signals[sid]
-        e = {'time': t, 'time_ticks': t, 'time_h': fmt_time(t, ts),
+        if t != last_t:
+            last_t = t
+            last_th = fmt_time(t, ts)
+        e = {'time': t, 'time_ticks': t, 'time_h': last_th,
              'path': info['path'], 'value': fmt_val(val, info)}
-        if getattr(args, 'verbose', False):
+        if verbose:
             e['width'] = info['width']
             e['type'] = info.get('type', 'wire')
         events.append(e)
@@ -1937,7 +2013,7 @@ def cmd_dump(vcd, args):
         if e['time'] != cur:
             cur = e['time']
             print('T={}'.format(e['time_h']))
-        if getattr(args, 'verbose', False):
+        if verbose:
             print('  {:<55} w={} {} = {}'.format(e['path'], e.get('width'), e.get('type'), e['value']))
         else:
             print('  {:<55} = {}'.format(e['path'], e['value']))

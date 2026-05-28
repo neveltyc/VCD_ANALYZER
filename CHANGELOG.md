@@ -5,7 +5,7 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/rel
 
 ## [1.3.12](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.12) - 2026-05-28
 
-Replace double-scan paths with single-pass iter_events in summary, compare, and search
+Replace double-scan paths with single-pass iter_events in summary, compare, and search. Refine summary_rows baseline phase to avoid redundant stats-dict creation, using a lightweight baseline dict with lazy stats dispatch.
 
 ## [1.3.11](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.11) - 2026-05-28
 

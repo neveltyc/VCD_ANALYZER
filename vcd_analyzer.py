@@ -1714,47 +1714,53 @@ def _summary_rows(vcd, t0, t1, sids):
     """
     selected = _selected_sids(vcd, sids)
     init_boundary = 0 if t0 == 0 else t0 - 1
+
+    # Baseline: {sid: val} — cheap str overwrites, same as _build_snapshot.
+    # Stats dicts are created only once per signal, not on every baseline event.
+    baseline = {}
     stats = {}
 
-    # Single iter_events from 0 to t1:
-    #   t <= init_boundary -> baseline (last value wins, like _build_snapshot)
-    #   t >  init_boundary -> analysis window (accumulate statistics)
+    def _make_stats(info, init_val):
+        is_scalar = info['width'] == 1
+        return {
+            'changes': 0, 'first_at': None, 'last_at': None,
+            'initial': init_val, 'last': init_val,
+            'unique': {init_val} if init_val is not None else set(),
+            'prev': init_val,
+            'rise_count': 0 if is_scalar else None,
+            'fall_count': 0 if is_scalar else None,
+        }
+
     for t, sid, val in vcd.iter_events(0, t1, selected):
         if t <= init_boundary:
-            # Baseline: record value (overwrite, last-write-wins semantics)
-            info = vcd.signals[sid]
-            stats[sid] = {
-                'changes': 0, 'first_at': None, 'last_at': None,
-                'initial': val, 'last': val, 'unique': {val},
-                'prev': val,
-                'rise_count': 0 if info['width'] == 1 else None,
-                'fall_count': 0 if info['width'] == 1 else None,
-            }
-        else:
-            # Analysis window
-            info = vcd.signals[sid]
-            is_scalar = info['width'] == 1
-            if sid not in stats:
-                stats[sid] = {
-                    'changes': 0, 'first_at': None, 'last_at': None,
-                    'initial': None, 'last': None, 'unique': set(),
-                    'prev': None, 'rise_count': 0 if is_scalar else None,
-                    'fall_count': 0 if is_scalar else None,
-                }
-            s = stats[sid]
-            prev = s.get('prev')
-            if is_scalar:
-                if prev == '0' and val == '1':
-                    s['rise_count'] += 1
-                elif prev == '1' and val == '0':
-                    s['fall_count'] += 1
-            s['changes'] += 1
-            if s['first_at'] is None:
-                s['first_at'] = t
-            s['last_at'] = t
-            s['last'] = val
-            s['prev'] = val
-            s['unique'].add(val)
+            baseline[sid] = val
+            continue
+
+        # First event in analysis window for this signal —
+        # initialize stats from baseline snapshot (if any).
+        if sid not in stats:
+            init_val = baseline.pop(sid, None)
+            stats[sid] = _make_stats(vcd.signals[sid], init_val)
+
+        s = stats[sid]
+        prev = s['prev']
+        info = vcd.signals[sid]
+        if info['width'] == 1:
+            if prev == '0' and val == '1':
+                s['rise_count'] += 1
+            elif prev == '1' and val == '0':
+                s['fall_count'] += 1
+        s['changes'] += 1
+        if s['first_at'] is None:
+            s['first_at'] = t
+        s['last_at'] = t
+        s['last'] = val
+        s['prev'] = val
+        s['unique'].add(val)
+
+    # Signals that were in baseline but had no in-window events (static).
+    for sid, val in baseline.items():
+        stats[sid] = _make_stats(vcd.signals[sid], val)
 
     rows = []
     for sid in sorted(stats, key=lambda x: vcd.signals[x]['path']):

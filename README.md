@@ -60,15 +60,13 @@ Single file, no dependencies, Python 3.9+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.10/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.11/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
 python vcd_analyzer.py --version
 ```
 
 No pip, no venv, no PyPI. Works anywhere curl and Python 3.9+ are available — CI containers, EDA servers, Docker builds, agent toolchains.
-
-`main` currently tracks the in-flight `1.3.11` development version. The latest published release tag remains `v1.3.10` until the next tag is cut.
 
 ## Commands
 

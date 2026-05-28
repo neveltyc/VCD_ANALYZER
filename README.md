@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.13-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.14-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
   <img alt="Tests" src="https://img.shields.io/badge/tests-52/52%20passed-22aa55?style=flat-square">
@@ -60,7 +60,7 @@ Single file, no dependencies, Python 3.9+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.13/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.14/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
 python vcd_analyzer.py --version
@@ -139,6 +139,7 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 
 | Version | Highlight |
 |:--------|:----------|
+| `1.3.14` | Stream `dump` text output; add benchmark harness |
 | `1.3.13` | Speed up the value-change hot path for large VCDs |
 | `1.3.12` | Replace double-scan paths with single-pass iter_events |
 | `1.3.11` | Faster filtered iteration and large-file time-range scanning |

@@ -3,6 +3,10 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) page.
 
+## [1.3.14](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.14) - 2026-05-29
+
+Stream `dump` text output instead of materializing every event into a dict and printing line by line: lines are formatted on the fly and flushed in batches, cutting a full `dump --limit 0` over a 40 MB trace to roughly a third of its former wall-clock time with byte-identical output. JSON output is unchanged. Add `verify/bench.py`, a self-contained benchmark and equivalence harness that generates a deterministic synthetic VCD, times each command with output sent to `/dev/null` (so a command is measured rather than the harness's pipe-draining cost), and with `--baseline` compares two copies while verifying their stdout is byte-for-byte identical.
+
 ## [1.3.13](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.13) - 2026-05-29
 
 Speed up the value-change hot path for large VCDs (roughly 2x on summary, snapshot, and compare over a 43 MB trace) with no change in output. Replace per-character `all()`/`any()` 4-state validation with C-level `str.translate`, flatten the data-section tokenizer to walk per-line token lists by index instead of resuming a per-token generator, inline the common 1-bit scalar value-change, and defer the over-wide 4-state scan in `fmt_val`/`_clamp_overwide_logic_value` behind a cheap width guard. `cmd_dump` now memoizes the formatted timestamp across events that share it.

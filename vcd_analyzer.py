@@ -56,7 +56,7 @@ Notes:
   "no match" result.
 """
 
-__version__ = '1.3.13'
+__version__ = '1.3.14'
 
 import sys
 import os
@@ -1975,50 +1975,81 @@ def cmd_dump(vcd, args):
         raise _TimeParseError('end time must be >= begin time')
     sids = vcd.match(args.filter)
     limit = _limit(args, 'dump')
-    total = 0
-    truncated = False
-    events = []
     verbose = getattr(args, 'verbose', False)
     # Many value_changes share one timestamp, so memoize the formatted time
     # across consecutive events. fmt_time() depends only on (t, ts), so this
-    # is output-identical while collapsing ~one fmt_time call per timestamp
+    # stays output-identical while collapsing ~one fmt_time call per timestamp
     # instead of one per event.
+
+    if args.json:
+        # JSON output needs the full event list materialized for serialization.
+        total = 0
+        truncated = False
+        events = []
+        last_t = object()
+        last_th = None
+        for t, sid, val in vcd.iter_events(t0, t1, sids):
+            total += 1
+            if limit != 0 and len(events) >= limit:
+                truncated = True
+                break
+            info = vcd.signals[sid]
+            if t != last_t:
+                last_t = t
+                last_th = fmt_time(t, ts)
+            e = {'time': t, 'time_ticks': t, 'time_h': last_th,
+                 'path': info['path'], 'value': fmt_val(val, info)}
+            if verbose:
+                e['width'] = info['width']
+                e['type'] = info.get('type', 'wire')
+            events.append(e)
+        obj = {'shown': len(events), 'truncated': truncated, 'events': events}
+        obj.update(_total_json_fields(total, truncated))
+        _json(obj)
+        return
+
+    # Text output streams straight to stdout: no per-event dict is built, and
+    # lines are flushed in batches rather than one print() per line. On a dump
+    # of millions of events this removes the intermediate list and most of the
+    # write-call overhead. The emitted bytes are identical to the prior
+    # two-pass implementation.
+    write = sys.stdout.write
+    buf = []
+    buf_append = buf.append
+    shown = 0
+    total = 0
+    truncated = False
+    cur = object()
     last_t = object()
     last_th = None
     for t, sid, val in vcd.iter_events(t0, t1, sids):
         total += 1
-        if limit != 0 and len(events) >= limit:
+        if limit != 0 and shown >= limit:
             truncated = True
             break
         info = vcd.signals[sid]
         if t != last_t:
             last_t = t
             last_th = fmt_time(t, ts)
-        e = {'time': t, 'time_ticks': t, 'time_h': last_th,
-             'path': info['path'], 'value': fmt_val(val, info)}
+        if t != cur:
+            cur = t
+            buf_append('T={}\n'.format(last_th))
         if verbose:
-            e['width'] = info['width']
-            e['type'] = info.get('type', 'wire')
-        events.append(e)
-    if args.json:
-        obj = {'shown': len(events), 'truncated': truncated, 'events': events}
-        obj.update(_total_json_fields(total, truncated))
-        _json(obj)
-        return
-    if not events:
+            buf_append('  {:<55} w={} {} = {}\n'.format(
+                info['path'], info['width'], info.get('type', 'wire'), fmt_val(val, info)))
+        else:
+            buf_append('  {:<55} = {}\n'.format(info['path'], fmt_val(val, info)))
+        shown += 1
+        if len(buf) >= 8192:
+            write(''.join(buf))
+            buf.clear()
+    if shown == 0:
         print('(no changes in range)')
         return
-    cur = None
-    for e in events:
-        if e['time'] != cur:
-            cur = e['time']
-            print('T={}'.format(e['time_h']))
-        if verbose:
-            print('  {:<55} w={} {} = {}'.format(e['path'], e.get('width'), e.get('type'), e['value']))
-        else:
-            print('  {:<55} = {}'.format(e['path'], e['value']))
+    if buf:
+        write(''.join(buf))
     if truncated:
-        print(_trunc_line_lower_bound(len(events), total, 'events'))
+        print(_trunc_line_lower_bound(shown, total, 'events'))
 
 
 def cmd_summary(vcd, args):

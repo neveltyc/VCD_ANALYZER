@@ -56,7 +56,7 @@ Notes:
   "no match" result.
 """
 
-__version__ = '1.3.15'
+__version__ = '1.3.16'
 
 import sys
 import os
@@ -1289,11 +1289,27 @@ class VCDParser:
 
                 # Standalone signal (may run after the bit-bus branch above when
                 # the sym serves both roles).
-                if sym not in self.signals:
+                info = self.signals.get(sym)
+                if info is None:
                     continue
                 if sids is not None and sym not in sids:
                     continue
-                pending[sym] = _clamp_overwide_logic_value(val, self.signals[sym])
+                # Inline the over-wide clamp guard. A scalar value (len 1) can
+                # never exceed a declared width >= 1, and on real dumps ~93% of
+                # standalone values are scalars and over-wide values are absent
+                # entirely — so calling _clamp_overwide_logic_value() for every
+                # event is almost pure call/dict/len overhead across tens of
+                # millions of events. Take the function only when the value is
+                # actually long enough to possibly need clamping; the helper
+                # remains the single source of truth for that rare case.
+                if len(val) == 1:
+                    pending[sym] = val
+                else:
+                    w = info.get('width')
+                    if w is None or len(val) <= w:
+                        pending[sym] = val
+                    else:
+                        pending[sym] = _clamp_overwide_logic_value(val, info)
 
             # Final flush
             if cur_t >= t0:

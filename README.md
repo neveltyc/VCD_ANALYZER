@@ -144,14 +144,7 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 | `1.3.15` | Chunked data tokenizer and one-line header fast path |
 | `1.3.14` | Stream `dump` text output; add benchmark harness |
 | `1.3.13` | Speed up the value-change hot path for large VCDs |
-| `1.3.12` | Replace double-scan paths with single-pass iter_events |
-| `1.3.11` | Faster filtered iteration and large-file time-range scanning |
-| `1.3.10` | Fix summary begin-boundary transition counting |
-| `1.3.9` | Eliminate duplicated value-change parsing |
-| `1.3.8` | Harden input validation &amp; error reporting |
-| `1.3.7` | Literal bus-range globs &amp; escaped-scope reporting |
-| `1.3.0` | Redesign search around conditions &amp; observations |
-| `1.0.0` | Initial public release |
+
 
 ## License
 

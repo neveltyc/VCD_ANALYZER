@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/版本-1.3.16-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/版本-1.3.17-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
   <img alt="Tests" src="https://img.shields.io/badge/测试-52/52%20通过-22aa55?style=flat-square">
@@ -58,7 +58,7 @@ python vcd_analyzer.py summary sim.vcd --filter dll_*
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.16/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.17/vcd_analyzer.py -o vcd_analyzer.py
 
 # 验证
 python vcd_analyzer.py --version
@@ -136,6 +136,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 | 版本 | 亮点 |
 |:------|:-----|
+| `1.3.17` | $var 解析器常见形态快路径(跳过括号扫描) |
 | `1.3.16` | 在值变化热路径上内联超宽钳制判断 |
 | `1.3.15` | 分块数据词法分析与单行头部声明快路径 |
 | `1.3.14` | dump 文本输出改为流式;新增基准测试工具 |

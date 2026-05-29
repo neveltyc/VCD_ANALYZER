@@ -56,7 +56,7 @@ Notes:
   "no match" result.
 """
 
-__version__ = '1.3.16'
+__version__ = '1.3.17'
 
 import sys
 import os
@@ -546,6 +546,41 @@ def _parse_var_tokens(body, scope_path):
     """
     if len(body) < 4:
         return None
+    nbody = len(body)
+
+    # Fast path for the two overwhelmingly common shapes emitted by VCS,
+    # Verilator, Icarus, etc., where the size is a plain integer (not a split
+    # '[ msb : lsb ]') and the reference is at most one trailing '[..]' token:
+    #   4 tokens: vtype width sym name                  (scalar / packed bus)
+    #   5 tokens: vtype width sym name [range-or-bit]   (bus or bit-select)
+    # This avoids the two _collect_bracket_tokens scans per variable on files
+    # that declare hundreds of thousands of them. Any shape that does not match
+    # (bracketed size, split range, extra tokens) falls through to the general
+    # parser below, so behaviour is unchanged for those.
+    if nbody <= 5:
+        b1 = body[1]
+        if not b1.startswith('['):
+            w = _safe_int_digits(b1)
+            if w is not None:
+                if w <= 0 or w > MAX_SIGNAL_WIDTH:
+                    raise _VCDResourceError(
+                        '$var width {} exceeds max {}; '
+                        'file may be corrupt or malicious'.format(w, MAX_SIGNAL_WIDTH))
+                vtype = body[0]
+                sym = body[2]
+                name = body[3]
+                if nbody == 4:
+                    return sym, name, w, None, scope_path, vtype
+                # nbody == 5: trailing reference token body[4].
+                ref = body[4]
+                if ref.startswith('[') and ref.endswith(']'):
+                    if w > 1:
+                        # Range folded into displayed name ('data[7:0]').
+                        return sym, name + ref, w, None, scope_path, vtype
+                    # 1-bit [N]: keep as bit_str for the bit-explosion heuristic.
+                    return sym, name, w, ref, scope_path, vtype
+                # Unexpected 5th token (e.g. split '[7 :'); fall through.
+
     vtype = body[0]
     size_expr, idx_after_size = _collect_bracket_tokens(body, 1)
     if size_expr is not None:

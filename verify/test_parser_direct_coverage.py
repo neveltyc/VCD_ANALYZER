@@ -165,6 +165,17 @@ def test_scan_time_range_handles_initial_dumpvars_only(tmp_path):
     assert v.scan_time_range() == (0, 0)
 
 
+def test_scan_time_range_tolerates_indented_timestamps(tmp_path):
+    # VCD is a free-format token stream: leading whitespace before a #T
+    # timestamp is legal.  The backward t_max scan must not collapse to t_min
+    # (which produced e.g. 500ns ~ 500ns for indented dumps).
+    text = minimal_vcd("$var wire 1 ! sig $end\n", "#0\n1!\n#100\n0!\n")
+    indented = "".join("    " + line + "\n" for line in text.splitlines())
+    p = write_vcd(tmp_path, indented, name="indented.vcd")
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 100)
+
+
 def test_scan_time_range_finds_last_timestamp_in_large_tail(tmp_path):
     body = ["#0", "0!"]
     for i in range(1, 6000):

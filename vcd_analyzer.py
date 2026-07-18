@@ -56,7 +56,7 @@ Notes:
   "no match" result.
 """
 
-__version__ = '1.3.17'
+__version__ = '1.3.18'
 
 import sys
 import os
@@ -1363,9 +1363,11 @@ class VCDParser:
           ``#T`` token (typically within the first few KB of data).  If value
           changes appear before any timestamp (e.g. $dumpvars block), t_min = 0.
         - **t_max**: backward scan from EOF — reads a 64 KB tail chunk and
-          finds the last ``#<digits>`` token that begins a line.  The buffer
-          doubles up to 4 MB on retry; for tiny files the forward scan already
-          covers the whole data section.
+          finds the last ``#<digits>`` token that begins a line (leading
+          horizontal whitespace/indentation is tolerated).  The buffer doubles
+          up to 4 MB on retry; if the whole data section is read without a hit,
+          it falls back to a full forward scan rather than masking the miss as
+          ``t_max = t_min``.
 
         This avoids a full sequential scan of the data section, reducing
         ``info`` on a 500 MB VCD from ~90 s to < 0.1 s.
@@ -1411,19 +1413,46 @@ class VCDParser:
         safe_data_offset = self._data_offset if self._data_offset < file_size else 0
         t_max = None
         buf_size = 65536
+        read_whole_data = False
         while buf_size <= 4 * 1024 * 1024:
             offset = max(safe_data_offset, file_size - buf_size)
             with open(self.path, 'rb') as f:
                 f.seek(offset)
                 chunk = f.read().decode('ascii', errors='replace')
-            # Match #<digits> at start of line to avoid false positives
-            timestamps = re.findall(r'(?:^|\n)#(\d+)', chunk)
+            # Match #<digits> that begins a line to avoid false positives.
+            # VCD is a free-format token stream: leading horizontal whitespace
+            # (indentation) before a timestamp is legal and must be tolerated,
+            # otherwise indented dumps collapse t_max to t_min.  ``[ \t]*`` only
+            # skips whitespace up to the line's first token, so a mid-line ``#5``
+            # value-change identifier (preceded by a space, not a newline) is
+            # still correctly ignored.
+            timestamps = re.findall(r'(?:\A|\n)[ \t]*#(\d+)', chunk)
             if timestamps:
                 t_max = max(int(t) for t in timestamps)
                 break
             if offset <= safe_data_offset:
+                read_whole_data = True
                 break  # already read the whole data section
             buf_size *= 2
+
+        # No timestamp found even after reading the entire data section.  Rather
+        # than silently masking the failure as ``t_max = t_min`` (which produces
+        # a plausible-looking but wrong ``500ns ~ 500ns``), fall back to a full
+        # forward scan for the last ``#T`` token.  For files small enough to be
+        # fully buffered here the cost is negligible.
+        if t_max is None and read_whole_data:
+            last = None
+            with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
+                f.seek(safe_data_offset)
+                for line in f:
+                    for tok in line.split():
+                        if tok.startswith('#') and len(tok) > 1:
+                            try:
+                                last = int(tok[1:])
+                            except ValueError:
+                                pass
+            if last is not None:
+                t_max = last
 
         if t_max is None:
             t_max = t_min

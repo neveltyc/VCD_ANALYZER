@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.18-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.19-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
   <img alt="Tests" src="https://img.shields.io/badge/tests-52/52%20passed-22aa55?style=flat-square">
@@ -139,12 +139,12 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 
 | Version | Highlight |
 |:--------|:----------|
+| `1.3.19` | Fix free-format VCD correctness: multi-declaration/timestamp-per-line, quiet-window search, rejected-token cascade, `$dumpall` change count |
 | `1.3.18` | Fix `info` `time_max` collapsing to `time_min` on indented VCD files |
 | `1.3.17` | Common-shape fast path in the `$var` parser (skip bracket scans) |
 | `1.3.16` | Inline the over-wide clamp guard on the value-change hot path |
 | `1.3.15` | Chunked data tokenizer and one-line header fast path |
 | `1.3.14` | Stream `dump` text output; add benchmark harness |
-| `1.3.13` | Speed up the value-change hot path for large VCDs |
 
 
 ## License

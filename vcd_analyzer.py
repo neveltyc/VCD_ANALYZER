@@ -56,7 +56,7 @@ Notes:
   "no match" result.
 """
 
-__version__ = '1.3.18'
+__version__ = '1.3.19'
 
 import sys
 import os
@@ -182,6 +182,12 @@ def _parse_timescale(text):
 
 class _TimeParseError(ValueError):
     """Raised by parse_time on invalid input; caught in main() for friendly CLI errors."""
+
+
+class _LimitParseError(ValueError):
+    """Raised when --limit is invalid (e.g. negative). Separate from
+    _TimeParseError so the two validation failures never share a message
+    identity; caught in main() for a friendly CLI error."""
 
 
 class _FilterParseError(argparse.ArgumentTypeError):
@@ -676,11 +682,15 @@ class VCDParser:
         ('$var wire 1 ! clk $end'). Those lines are handled by a direct fast
         path that avoids the per-token state machine; VCS/Verdi/GTKWave files
         can carry hundreds of thousands of $var records, so this materially
-        cuts startup time for every command. Free-format and multi-line
-        declarations fall through to the tolerant token parser. Both paths
-        feed the same _parse_var_tokens helper, so the parsed signal table is
-        identical regardless of which path a line takes (verified against the
-        token-only parser across fixtures and adversarial headers)."""
+        cuts startup time for every command. Free-format lines fall through to
+        the tolerant token parser: multi-line declarations, and — because VCD is
+        free-format — several declarations packed onto one physical line
+        ('$var .. $end $var .. $end', or two $scope). The fast path is taken only
+        when the line holds exactly one self-contained declaration (a single
+        trailing $end); both paths feed the same _parse_var_tokens helper, so the
+        parsed signal table is identical regardless of which path a line takes
+        (asserted by the header-equivalence tests, including multi-declaration
+        and indented lines)."""
         scope = []
         scope_path = ''
         raw_vars = []  # (sym, name, width, bit_idx_str, scope_path, vtype)
@@ -711,14 +721,22 @@ class VCDParser:
                 if current_kw is None:
                     stripped = line.strip()
                     if stripped:
-                        if stripped.startswith('$var ') and stripped.endswith(' $end'):
-                            toks = stripped.split()
-                            if len(toks) >= 6 and toks[-1] == '$end':
+                        toks = stripped.split()
+                        # Valid ONLY for a single self-contained declaration:
+                        # exactly one $end, as the final token. A free-format
+                        # line may legally pack several declarations
+                        # ('$var .. $end $var .. $end', two $scope); those carry
+                        # an interior $end and MUST fall through to the token
+                        # parser below, which handles repeated keyword..$end
+                        # groups. Gating on a single trailing $end is what keeps
+                        # the fast and generic paths' signal tables identical.
+                        single = toks[-1] == '$end' and toks.count('$end') == 1
+                        if single and stripped.startswith('$var '):
+                            if len(toks) >= 6:
                                 _append_var(toks[1:-1])
                                 continue
-                        elif stripped.startswith('$scope ') and stripped.endswith(' $end'):
-                            toks = stripped.split()
-                            if len(toks) >= 4 and toks[-1] == '$end':
+                        elif single and stripped.startswith('$scope '):
+                            if len(toks) >= 4:
                                 if len(scope) >= MAX_SCOPE_DEPTH:
                                     raise _VCDResourceError(
                                         '$scope nesting depth exceeds {}; '
@@ -726,20 +744,19 @@ class VCDParser:
                                 scope.append(toks[2])
                                 scope_path = '.'.join(scope)
                                 continue
-                        elif stripped == '$upscope $end':
+                        elif single and stripped == '$upscope $end':
                             if scope:
                                 scope.pop()
                                 scope_path = '.'.join(scope)
                             continue
-                        elif stripped.startswith('$timescale ') and stripped.endswith(' $end'):
-                            toks = stripped.split()
+                        elif single and stripped.startswith('$timescale '):
                             ts_body = ' '.join(toks[1:-1])
                             self.ts_str = '$timescale ' + ts_body + ' $end'
                             self.ts_sec = _parse_timescale(ts_body)
                             continue
-                        elif (stripped.startswith('$date ') or stripped.startswith('$version ') or
-                              stripped.startswith('$comment ')) and stripped.endswith(' $end'):
-                            toks = stripped.split()
+                        elif single and (stripped.startswith('$date ') or
+                                         stripped.startswith('$version ') or
+                                         stripped.startswith('$comment ')):
                             kw = toks[0]
                             text = ' '.join(toks[1:-1])
                             if kw == '$date':
@@ -1086,23 +1103,33 @@ class VCDParser:
 
         if first in 'bB':
             bits = tok[1:]
-            if not bits or bits.translate(_DEL_4STATE_CI):
-                return None
+            # Consume the identifier_code BEFORE validating the value. A b-token
+            # opener always owns the next token as its identifier (unless that
+            # token is structural — a timestamp — which is pushed back).
+            # Validating first and returning without consuming would leak a
+            # malformed value's identifier back to the top level, where e.g.
+            # 'b1012 1&' re-parses '1&' as a scalar change on signal '&' — a
+            # phantom event. See test_freeformat_1_3_19.py (B4).
             sym = next_token()
             if self._is_structural_token(sym):
                 if sym is not None:
                     pushback.append(sym)
+                return None
+            if not bits or bits.translate(_DEL_4STATE_CI):
                 return None
             return sym, bits.lower()
 
         if first in 'rR':
             body = tok[1:]
-            if len(body) > _REAL_MAX_LEN or not _REAL_RE.match(body):
-                return None
+            # Consume the identifier_code before validating (see the b-token
+            # note above): 'rnan x!' must not leak 'x!' back to be mis-read as a
+            # scalar change. NaN/Inf are legal %g output that _REAL_RE rejects.
             sym = next_token()
             if self._is_structural_token(sym):
                 if sym is not None:
                     pushback.append(sym)
+                return None
+            if len(body) > _REAL_MAX_LEN or not _REAL_RE.match(body):
                 return None
             return sym, body
 
@@ -1359,45 +1386,65 @@ class VCDParser:
         """Min/max timestamps in the file.
 
         Uses a bidirectional strategy for large files:
-        - **t_min**: forward scan from ``_data_offset`` — stops at the first
-          ``#T`` token (typically within the first few KB of data).  If value
-          changes appear before any timestamp (e.g. $dumpvars block), t_min = 0.
-        - **t_max**: backward scan from EOF — reads a 64 KB tail chunk and
-          finds the last ``#<digits>`` token that begins a line (leading
-          horizontal whitespace/indentation is tolerated).  The buffer doubles
-          up to 4 MB on retry; if the whole data section is read without a hit,
-          it falls back to a full forward scan rather than masking the miss as
-          ``t_max = t_min``.
+        - **t_min**: forward token scan from ``_data_offset`` — stops at the
+          first ``#T`` token (typically within the first few KB of data).  If
+          value changes appear before any timestamp (e.g. a $dumpvars block),
+          t_min = 0.  Non-value sections ($comment/$vcdclose) are skipped to
+          their matching $end, honouring a same-line $end.
+        - **t_max**: backward scan from EOF — reads a 64 KB tail chunk and takes
+          the largest top-level ``#<digits>`` token in it via a section-aware
+          walk.  VCD is free-format, so a timestamp may begin a line OR follow
+          other tokens mid-line (several per line are legal); every token is
+          considered, while a ``#<digits>`` inside a $comment/$vcdclose body, or
+          one that is actually a b/r/p identifier_code, is excluded exactly as
+          the parser does.  The buffer doubles up to 4 MB on retry; once the
+          whole data section has been scanned with no hit, t_max degrades to
+          t_min rather than masking the miss with a wrong value.
+
+        All ``#T`` parsing routes through the hardened
+        ``_parse_vcd_timestamp_token`` (bounded digit length, int64 cap) so a
+        hostile timestamp yields a clean CLI error instead of a raw traceback,
+        matching iter_events().
 
         This avoids a full sequential scan of the data section, reducing
         ``info`` on a 500 MB VCD from ~90 s to < 0.1 s.
         """
-        # -- t_min: forward scan --
+        # -- t_min: forward token scan --
+        # Flat token walk with an explicit skip flag, mirroring iter_events():
+        # a single-line '$comment .. $end' closes on its own $end token rather
+        # than over-skipping subsequent lines (which would swallow the real
+        # first timestamp and report a wrong t_min).
         t_min = None
         saw_initial_data = False
+        skipping = False
         with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
             f.seek(self._data_offset)
             for line in f:
                 for tok in line.split():
+                    if skipping:
+                        if tok == '$end':
+                            skipping = False
+                        continue
                     if tok == '$end' or tok in _SIM_KEYWORDS:
                         if tok == '$dumpvars':
                             saw_initial_data = True
                         continue
                     if tok.startswith('$'):
-                        # skip to $end of this section
-                        for t2 in f:
-                            if '$end' in t2:
-                                break
-                        break
+                        # $comment/$vcdclose/other: skip its body to the matching
+                        # $end (same-line or later), then resume token scanning.
+                        skipping = True
+                        continue
                     if tok.startswith('#') and len(tok) > 1:
-                        try:
-                            t_min = 0 if saw_initial_data else int(tok[1:])
-                        except ValueError:
-                            continue
+                        v = _parse_vcd_timestamp_token(tok)
+                        if v is None:
+                            continue  # malformed (e.g. '#1.5'); tolerate
+                        t_min = 0 if saw_initial_data else v
                         break
-                    # Value change before first timestamp
+                    # Value change before first timestamp. Only lowercase 'p' is
+                    # a real extended-VCD opener; the parser never emits for
+                    # uppercase 'P', so it must not count as initial data.
                     c = tok[0]
-                    if c in '01xzXZbBrRpP' and len(tok) >= 2:
+                    if c in '01xzXZbBrRp' and len(tok) >= 2:
                         saw_initial_data = True
                 if t_min is not None:
                     break
@@ -1406,54 +1453,54 @@ class VCDParser:
             t_min = 0
 
         # -- t_max: backward scan from EOF --
-        import os as _os
-        file_size = _os.path.getsize(self.path)
+        file_size = os.path.getsize(self.path)
         # _data_offset may be a text-mode tell() cookie (opaque, potentially
         # larger than file_size); clamp to a safe floor for binary seek.
         safe_data_offset = self._data_offset if self._data_offset < file_size else 0
         t_max = None
         buf_size = 65536
-        read_whole_data = False
         while buf_size <= 4 * 1024 * 1024:
             offset = max(safe_data_offset, file_size - buf_size)
             with open(self.path, 'rb') as f:
                 f.seek(offset)
                 chunk = f.read().decode('ascii', errors='replace')
-            # Match #<digits> that begins a line to avoid false positives.
-            # VCD is a free-format token stream: leading horizontal whitespace
-            # (indentation) before a timestamp is legal and must be tolerated,
-            # otherwise indented dumps collapse t_max to t_min.  ``[ \t]*`` only
-            # skips whitespace up to the line's first token, so a mid-line ``#5``
-            # value-change identifier (preceded by a space, not a newline) is
-            # still correctly ignored.
-            timestamps = re.findall(r'(?:\A|\n)[ \t]*#(\d+)', chunk)
-            if timestamps:
-                t_max = max(int(t) for t in timestamps)
+            # Section-aware token scan of the tail: a '#<digits>' is a timestamp
+            # only at top level. $comment/$vcdclose bodies may contain a '#123'
+            # (e.g. '$vcdclose #100 $end') that is NOT a timestamp, so they are
+            # skipped to their $end exactly as the parser does; a '#<digits>'
+            # that is a declared identifier_code is likewise excluded. Free-format
+            # mid-line timestamps ('1! #20 0!') are handled naturally by the token
+            # walk. When the whole data section is read (small files, or the
+            # buffer grown to cover it) the skip state is exact; on a partial tail
+            # it starts at top level — correct unless a chunk boundary splits a
+            # section body, a rare edge no worse than the prior line heuristic.
+            best = None
+            skipping = False
+            for tok in chunk.split():
+                if skipping:
+                    if tok == '$end':
+                        skipping = False
+                    continue
+                if tok == '$end' or tok in _SIM_KEYWORDS:
+                    continue
+                if tok.startswith('$'):
+                    skipping = True
+                    continue
+                if (tok.startswith('#') and len(tok) > 1
+                        and tok not in self.signals and tok not in self._bit_map):
+                    v = _parse_vcd_timestamp_token(tok)
+                    if v is not None and (best is None or v > best):
+                        best = v
+            if best is not None:
+                t_max = best
                 break
             if offset <= safe_data_offset:
-                read_whole_data = True
-                break  # already read the whole data section
+                break  # whole data section scanned; genuinely no timestamp
             buf_size *= 2
 
-        # No timestamp found even after reading the entire data section.  Rather
-        # than silently masking the failure as ``t_max = t_min`` (which produces
-        # a plausible-looking but wrong ``500ns ~ 500ns``), fall back to a full
-        # forward scan for the last ``#T`` token.  For files small enough to be
-        # fully buffered here the cost is negligible.
-        if t_max is None and read_whole_data:
-            last = None
-            with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
-                f.seek(safe_data_offset)
-                for line in f:
-                    for tok in line.split():
-                        if tok.startswith('#') and len(tok) > 1:
-                            try:
-                                last = int(tok[1:])
-                            except ValueError:
-                                pass
-            if last is not None:
-                t_max = last
-
+        # If the whole data section was scanned above without a hit, there is no
+        # top-level timestamp; t_max degrades to t_min below rather than masking
+        # the miss. (A >4 MB tail with no timestamp is malformed and left as-is.)
         if t_max is None:
             t_max = t_min
         if t_min is None:
@@ -1479,7 +1526,7 @@ def _limit(args, cmd):
     if val is None:
         return 0 if getattr(args, 'verbose', False) else _DEFAULT_LIMIT
     if val < 0:
-        raise _TimeParseError('limit must be non-negative; got {}'.format(val))
+        raise _LimitParseError('limit must be non-negative; got {}'.format(val))
     return val
 
 
@@ -1985,18 +2032,24 @@ def _summary_rows(vcd, t0, t1, sids):
 
         s = stats[sid]
         prev = s['prev']
-        if s['scalar']:
-            if prev == '0' and val == '1':
-                s['rise_count'] += 1
-            elif prev == '1' and val == '0':
-                s['fall_count'] += 1
-        s['changes'] += 1
-        if s['first_at'] is None:
-            s['first_at'] = t
-        s['last_at'] = t
-        s['last'] = val
-        s['prev'] = val
-        s['unique'].add(val)
+        # Count genuine transitions only. $dumpall/$dumpon checkpoints re-emit
+        # every signal's current value even when unchanged; a redundant
+        # same-value record must not inflate 'changes' (which would flip a
+        # never-changing signal from static to active). A same-value record also
+        # leaves first_at/last_at/last/unique untouched — they already reflect it.
+        if val != prev:
+            if s['scalar']:
+                if prev == '0' and val == '1':
+                    s['rise_count'] += 1
+                elif prev == '1' and val == '0':
+                    s['fall_count'] += 1
+            s['changes'] += 1
+            if s['first_at'] is None:
+                s['first_at'] = t
+            s['last_at'] = t
+            s['last'] = val
+            s['prev'] = val
+            s['unique'].add(val)
 
     # Signals that were in baseline but had no in-window events (static).
     for sid, val in baseline.items():
@@ -2134,7 +2187,12 @@ def cmd_list(vcd, args):
     if args.json:
         _json({'total': len(entries), 'shown': len(shown), 'truncated': trunc, 'signals': shown})
     else:
-        print('Matched: {}/{}'.format(len(entries), len(vcd.signals)))
+        # Numerator and denominator are both alias-path counts: 'entries' holds
+        # one row per alias of each matched signal, so the total must likewise
+        # count aliases across all signals (not unique signals) — otherwise a
+        # single signal with two aliases prints a nonsensical "Matched: 2/1".
+        total_aliases = sum(len(info['aliases']) for info in vcd.signals.values())
+        print('Matched: {}/{}'.format(len(entries), total_aliases))
         for e in shown:
             print('  {:<60} {:>5}  {}'.format(e['path'], e['width'], e['type']))
         if trunc:
@@ -2381,6 +2439,13 @@ def cmd_search(vcd, args):
     t1_raw = parse_time(args.end, ts) if args.end else None
     t1 = _search_end_time(vcd, t0, t1_raw)
     if t1 < t0:
+        if t1_raw is None:
+            # No --end was given, so t1 is the file's last timestamp. A --begin
+            # past it is an empty range, not an end-before-begin ordering error;
+            # say so instead of blaming an --end the user never supplied.
+            raise _TimeParseError(
+                'begin time {} is after the last event at {}; nothing to search'.format(
+                    fmt_time(t0, ts), fmt_time(t1, ts)))
         raise _TimeParseError('end time must be >= begin time')
 
     conditions = _resolve_conditions(vcd, args.condition)
@@ -2601,6 +2666,18 @@ def cmd_search(vcd, args):
             group = []
         group.append((sid, val))
 
+    # If the selected signals produced no events in (t0, t1], the per-event init
+    # check above never ran, so a condition that already holds across an
+    # otherwise silent window would be missed (false "No interval"). Evaluate it
+    # now from the baseline state. group is empty in this case, so the block
+    # below is skipped and the final-interval emit reports the whole window.
+    if not init_checks_done:
+        active = _conditions_hold(state, conditions)
+        seg_start = t0 if active else None
+        if active and has_show:
+            seg_values, seg_meta = _show_values(vcd, state, show_sids, verbose)
+        init_checks_done = True
+
     # Process final pending group
     if group and not truncated:
         for gsid, gval in group:
@@ -2771,6 +2848,8 @@ def main():
     except PermissionError as e:
         sys.exit('Error: permission denied: {}'.format(e.filename or args.file))
     except _TimeParseError as e:
+        sys.exit('Error: ' + str(e))
+    except _LimitParseError as e:
         sys.exit('Error: ' + str(e))
     except _ValueParseError as e:
         sys.exit('Error: ' + str(e))

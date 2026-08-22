@@ -14,8 +14,8 @@ All commands support `--json` for structured output. **Always use `--json` when 
 ## Setup (one-time)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.18/vcd_analyzer.py -o vcd_analyzer.py
-python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.3.18
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.20/vcd_analyzer.py -o vcd_analyzer.py
+python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.3.20
 ```
 
 No pip install, no virtualenv, no dependencies. Python 3.9+.
@@ -170,6 +170,8 @@ python3 vcd_analyzer.py --json search <file> --changed data_out --condition "val
 Returns `events[]` with `time_ticks`, `time_h`, `values: {path: formatted_value}`.
 
 Each event fires when the `--changed` signal genuinely transitions (not initial assignment, not same-value re-dump). If `--show` is omitted, the changed signal itself becomes the show list.
+
+**Condition phase:** `--condition` is evaluated on the **post-change state** (the value after the transition at that timestamp). So `"a=1"` reports edges into 1, and `"a!=0"` reports a 0→1 edge. Do not read `--condition` as a filter on the pre-transition value.
 
 ### Condition syntax
 

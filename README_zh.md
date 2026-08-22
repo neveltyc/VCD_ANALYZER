@@ -7,10 +7,10 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/版本-1.3.19-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/版本-1.3.20-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/测试-52/52%20通过-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/测试-88%20collected-22aa55?style=flat-square">
 </p>
 
 ---
@@ -58,7 +58,7 @@ python vcd_analyzer.py summary sim.vcd --filter dll_*
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.19/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.20/vcd_analyzer.py -o vcd_analyzer.py
 
 # 验证
 python vcd_analyzer.py --version
@@ -92,6 +92,18 @@ python vcd_analyzer.py --version
 python vcd_analyzer.py --json info sim.vcd
 python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ```
+
+## 语义说明
+
+- **保留每一次值变化。** IEEE 1364 允许同一时间戳内对同一信号写多次
+  value change（delta-cycle 风格的仿真器）；`dump` 按顺序全部输出。
+  连续相同值会合并，`$dumpall`/`$dumpon` 检查点重发当前值不产生
+  变化事件（`summary` 的 static/active 统计保持精确）。
+- **`search --changed` 的条件在跳变后的状态上求值** —— 即该时间戳上
+  transition 之后的值。`"a=1"` 报告进入 1 的上升沿；`"a!=0"` 报告 0→1 跳变。
+- **时间窗口。** 不给 `--end` 时，有效终点是文件最后一个时间戳，
+  超出的 `--begin` 会报错。显式 `--end` 超过最后时间戳时，最后已知状态
+  会延续到该窗口（与 `snapshot`/`compare` 的 last-known-value 语义一致）。
 
 ## 单文件，零依赖
 
@@ -136,6 +148,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 | 版本 | 亮点 |
 |:------|:-----|
+| `1.3.20` | 保留同一时间戳内的多次值变化;`info` 的 `t_max` 在 >4 MiB 同时间戳尾部不再塌缩;文档化 `--changed` 的 post-change 语义;`info` 的 `--limit` 校验与空数据输出 |
 | `1.3.19` | 修复自由格式 VCD 正确性:一行多声明/多时间戳、静默窗口搜索、非法令牌级联、`$dumpall` 跳变计数 |
 | `1.3.18` | 修复 `info` 在缩进 VCD 文件上 `time_max` 塌缩为 `time_min` 的问题 |
 | `1.3.17` | $var 解析器常见形态快路径(跳过括号扫描) |

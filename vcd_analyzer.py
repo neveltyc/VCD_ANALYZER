@@ -36,6 +36,9 @@ Argument formats:
   --changed K     Optional trigger signal; emit events only when this signal really changes.
                   For ordinary signals, first observed values are not treated as changes.
                   VCD event variables count each trigger; t=0 initialization is ignored.
+                  --condition is evaluated against the POST-change state (the value
+                  after the transition at that timestamp), so e.g. "a=1" reports
+                  rising edges into 1, and "a!=0" reports a 0->1 edge.
 
 Examples:
   vcd_analyzer info sim.vcd
@@ -54,9 +57,21 @@ Notes:
   search requires at least one observed value_change in the VCD data section;
   empty waveforms are reported as an input/data issue rather than as a false
   "no match" result.
+
+  Time windows: with no --end, the effective end is the file's last timestamp.
+  With an explicit --end beyond the last timestamp, the last known state is
+  extended into that window (the same last-known-value persistence used by
+  snapshot/compare); a --begin past the last timestamp without --end is an
+  error, while with --end it simply queries the extended window.
+
+  Value-change fidelity: every value_change in the file is preserved. Several
+  changes to the same signal within one timestamp (legal per IEEE 1364-2005,
+  e.g. delta-cycle style writers) are emitted in order, with consecutive
+  identical records coalesced; a $dumpall/$dumpon checkpoint re-emitting the
+  current value does not add a change event.
 """
 
-__version__ = '1.3.19'
+__version__ = '1.3.20'
 
 import sys
 import os
@@ -226,9 +241,11 @@ def _parse_vcd_timestamp_token(tok):
     timestamps are silently skipped, the rest of the stream continues.
 
     Raises _VCDResourceError for inputs that would cause CPU/memory DoS or
-    exceed int64. Python 3.11+ has PEP 678 (int_max_str_digits) baked in,
-    but we target 3.9 where int(s) is O(n^2) for huge n; even on 3.11+
-    the PEP 678 ValueError would otherwise become an unhandled traceback.
+    exceed int64. Python 3.11+ imposes a built-in decimal digit limit on
+    int(str) (sys.int_max_str_digits, default 4300) as a CPU-DoS countermeasure
+    (bpo/GH-95770; no PEP - PEP 678 is the unrelated exception add_note()
+    proposal), but we target 3.9 where int(s) is O(n^2) for huge n; even on
+    3.11+ that ValueError would otherwise become an unhandled traceback.
     """
     digits = tok[1:]
     if len(digits) > MAX_TIME_ARG_LEN:
@@ -255,8 +272,8 @@ def _safe_int_digits(s):
     _VCDResourceError with richer context.
 
     Length cap MAX_INT_DIGITS=100 defends against the same Python 3.9
-    O(n^2) decimal-int and Python 3.11+ PEP 678 ValueError issues as
-    _parse_vcd_timestamp_token. 100 digits is far beyond any legitimate
+    O(n^2) decimal-int and Python 3.11+ int_max_str_digits ValueError issues
+    as _parse_vcd_timestamp_token. 100 digits is far beyond any legitimate
     bit width or index (which fit in 4 digits comfortably).
     """
     if not s or len(s) > MAX_INT_DIGITS:
@@ -405,8 +422,9 @@ def fmt_val(value, info):
 def val_to_int(value):
     """Try converting to int, None on x/z or pathologically long values.
 
-    int(s, 2) is O(n) for base-2 (PEP 678 does not apply to power-of-two
-    bases) so the worst case after MAX_SIGNAL_WIDTH=65536 is sub-ms — but
+    int(s, 2) is O(n) for base-2 (the 3.11+ int_max_str_digits limit does
+    not apply to power-of-two bases) so the worst case after
+    MAX_SIGNAL_WIDTH=65536 is sub-ms — but
     we cap anyway as defense in depth, in case a future code path lets
     an unbounded value reach here.
     """
@@ -1179,15 +1197,42 @@ class VCDParser:
         Initial value changes appearing before any '#T' timestamp are
         emitted at logical t=0 (typical case: $dumpvars block directly
         after $enddefinitions without a leading #0).
+
+        Every value_change is emitted: the IEEE 1364 grammar allows any
+        number of value_changes per simulation_time, and a writer may legally
+        emit several for the same identifier within one timestamp (delta-cycle
+        style dumps). Within one timestamp, consecutive identical records for
+        a signal coalesce (a '1a 1a' pair is one event); the previously
+        observed value is tracked across timestamp boundaries so a $dumpall/
+        $dumpon checkpoint re-emitting the current value stays a no-op (the
+        1.3.19 static/active accounting is preserved). Event variables are
+        markers, not levels: every record counts ('VCD event variables count
+        each trigger'). Snapshot/compare last-write-wins semantics are
+        unchanged.
         """
         cur_t = 0
-        pending = {}
+        pending = []       # ordered [(sid, val), ...] — preserves intra-timestamp order
+        last_val = {}      # sid -> previously observed value (no-op suppression)
+
+        def _record(sid, val):
+            # Append unless this is a no-op re-assertion of the previously
+            # observed value. Event variables skip the check: their records
+            # are trigger markers and each one counts.
+            sinfo = self.signals.get(sid)
+            is_event = sinfo is not None and sinfo.get('type') == 'event'
+            if not is_event and last_val.get(sid) == val:
+                return
+            pending.append((sid, val))
+            last_val[sid] = val
 
         def _flush():
             if not pending:
                 return []
-            items = list(pending.items())
+            items = list(pending)
             pending.clear()
+            # last_val is deliberately NOT cleared: it is the running
+            # "previously observed value" used to suppress no-op re-emissions
+            # across timestamp boundaries (e.g. $dumpall checkpoints).
             return items
 
         # Flattened tokenizer. The data section is consumed as a sequence of
@@ -1347,7 +1392,7 @@ class VCDParser:
                     for gid, idx in bit_map[sym]:
                         bit_state[gid][idx] = bit_val
                         if sids is None or gid in sids:
-                            pending[gid] = ''.join(reversed(bit_state[gid]))
+                            _record(gid, ''.join(reversed(bit_state[gid])))
 
                 # Standalone signal (may run after the bit-bus branch above when
                 # the sym serves both roles).
@@ -1365,13 +1410,13 @@ class VCDParser:
                 # actually long enough to possibly need clamping; the helper
                 # remains the single source of truth for that rare case.
                 if len(val) == 1:
-                    pending[sym] = val
+                    _record(sym, val)
                 else:
                     w = info.get('width')
                     if w is None or len(val) <= w:
-                        pending[sym] = val
+                        _record(sym, val)
                     else:
-                        pending[sym] = _clamp_overwide_logic_value(val, info)
+                        _record(sym, _clamp_overwide_logic_value(val, info))
 
             # Final flush
             if cur_t >= t0:
@@ -1391,15 +1436,13 @@ class VCDParser:
           value changes appear before any timestamp (e.g. a $dumpvars block),
           t_min = 0.  Non-value sections ($comment/$vcdclose) are skipped to
           their matching $end, honouring a same-line $end.
-        - **t_max**: backward scan from EOF — reads a 64 KB tail chunk and takes
-          the largest top-level ``#<digits>`` token in it via a section-aware
-          walk.  VCD is free-format, so a timestamp may begin a line OR follow
-          other tokens mid-line (several per line are legal); every token is
-          considered, while a ``#<digits>`` inside a $comment/$vcdclose body, or
-          one that is actually a b/r/p identifier_code, is excluded exactly as
-          the parser does.  The buffer doubles up to 4 MB on retry; once the
-          whole data section has been scanned with no hit, t_max degrades to
-          t_min rather than masking the miss with a wrong value.
+        - **t_max**: reverse token walk over 4 MiB tail windows from EOF.
+          The first top-level ``#<digits>`` met in reverse file order is the
+          last timestamp, so the scan stops at the first hit and never
+          degrades — legal files may carry an unbounded value_change run
+          after the final timestamp.  A ``#<digits>`` inside a $comment/
+          $vcdclose body, or one that is a declared identifier_code, is
+          excluded exactly as the parser does.
 
         All ``#T`` parsing routes through the hardened
         ``_parse_vcd_timestamp_token`` (bounded digit length, int64 cap) so a
@@ -1453,54 +1496,105 @@ class VCDParser:
             t_min = 0
 
         # -- t_max: backward scan from EOF --
+        # Strategy: read the tail in 4 MiB windows from EOF and walk the
+        # tokens in REVERSE. The first top-level '#<digits>' met in reverse
+        # file order is the LAST timestamp, so the scan stops at the first
+        # hit and never degrades.
+        #
+        # Why a reverse walk instead of forward chunk scans: a legal VCD may
+        # carry an unbounded number of value_changes after the final
+        # timestamp (IEEE 1364-2005 simulation_command allows arbitrary
+        # value_change runs per simulation_time; nothing caps a trailing
+        # same-timestamp region). A forward scan that stops after 4 MiB
+        # without a hit would silently collapse t_max to t_min on exactly
+        # those files; walking from EOF, the last timestamp is found as soon
+        # as the scan crosses it, no matter how much data follows it.
+        #
+        # Reverse section state machine. Forward, the grammar is
+        #   $kw {body tokens} $end
+        # so the token sequence in file order is $kw, body..., $end. Walked in
+        # REVERSE, the sequence is $end, body..., $kw — the mirror image:
+        #   top level:  a '$end' token ENTERS a region (we have just crossed
+        #               its closing marker; its body follows in reverse order)
+        #   in region:  body tokens are skipped; the region's OPENING '$kw'
+        #               token EXITS back to top level; a nested '$end' (a
+        #               region opened inside this one) keeps us in-region —
+        #               its body and '$kw' are consumed as outer body
+        # Consequence: a region's body is never read as top level, so a
+        # '#999' inside a trailing '$comment ... $end' is skipped, not
+        # misread as a timestamp. In the forward parser a bare '$end' at top
+        # level is inert; in reverse order a bare '$end' always closes some
+        # region (its '$kw' lies further back in file order), so treating
+        # every '$end' as a region entry is exact for well-formed files and
+        # degrades gracefully on malformed ones. A '$kw' met at top level in
+        # reverse order can only be the opening keyword of an unterminated
+        # region (its closing '$end' is missing); it is treated as a marker.
+        #
+        # $vcdclose is handled like any other region (body skipped to its
+        # $kw), exactly matching the forward parser and iter_events(): the
+        # '#T' inside '$vcdclose #T $end' is a simulation_time record, not a
+        # top-level timestamp, so it does not extend t_max.
+        #
+        # Window start: a partial window (start > data_offset) may begin
+        # mid-region — i.e. inside body tokens that continue before the
+        # window. The walk then starts in-region, so the body is skipped up
+        # to the region's opening '$kw'. A region longer than the whole
+        # window is the one unresolvable case; it only shifts the start, and
+        # the window is 4 MiB.
+        #
+        # Chunk boundaries: chunks are read as bytes and split on ASCII
+        # whitespace (VCD is an ASCII token stream; identifier_codes are
+        # printable ASCII), so a boundary can never split or merge tokens,
+        # regardless of multi-byte sequences in $comment bodies.
         file_size = os.path.getsize(self.path)
         # _data_offset may be a text-mode tell() cookie (opaque, potentially
         # larger than file_size); clamp to a safe floor for binary seek.
         safe_data_offset = self._data_offset if self._data_offset < file_size else 0
+        window = min(4 * 1024 * 1024, max(file_size - safe_data_offset, 0))
         t_max = None
-        buf_size = 65536
-        while buf_size <= 4 * 1024 * 1024:
-            offset = max(safe_data_offset, file_size - buf_size)
+        end = file_size
+        while window > 0 and end > safe_data_offset and t_max is None:
+            start = max(safe_data_offset, end - window)
             with open(self.path, 'rb') as f:
-                f.seek(offset)
-                chunk = f.read().decode('ascii', errors='replace')
-            # Section-aware token scan of the tail: a '#<digits>' is a timestamp
-            # only at top level. $comment/$vcdclose bodies may contain a '#123'
-            # (e.g. '$vcdclose #100 $end') that is NOT a timestamp, so they are
-            # skipped to their $end exactly as the parser does; a '#<digits>'
-            # that is a declared identifier_code is likewise excluded. Free-format
-            # mid-line timestamps ('1! #20 0!') are handled naturally by the token
-            # walk. When the whole data section is read (small files, or the
-            # buffer grown to cover it) the skip state is exact; on a partial tail
-            # it starts at top level — correct unless a chunk boundary splits a
-            # section body, a rare edge no worse than the prior line heuristic.
-            best = None
-            skipping = False
-            for tok in chunk.split():
-                if skipping:
-                    if tok == '$end':
-                        skipping = False
+                f.seek(start)
+                data = f.read(end - start)
+            if not data:
+                break
+            toks = data.split()
+            inside = start > safe_data_offset
+            for tok_b in reversed(toks):
+                tok = tok_b.decode('ascii', errors='replace')
+                if inside:
+                    # In-region (reverse): skip body tokens until the region's
+                    # opening '$kw' exits us. A '$end' here is a nested
+                    # region's closing marker — stay in-region (its body and
+                    # '$kw' will be consumed as part of the outer body skip).
+                    if tok.startswith('$') and not tok.startswith('$end'):
+                        # '$kw' opening keyword of (the outermost open) region
+                        if tok not in _SIM_KEYWORDS:
+                            inside = False
                     continue
-                if tok == '$end' or tok in _SIM_KEYWORDS:
+                if tok in _SIM_KEYWORDS:
+                    # $dumpvars etc. are bare markers in both directions.
+                    continue
+                if tok == '$end':
+                    # Closing marker of a region whose body follows (reverse).
+                    inside = True
                     continue
                 if tok.startswith('$'):
-                    skipping = True
+                    # A $kw at top level in reverse order opens a region whose
+                    # body lies toward file start — but we are walking toward
+                    # file start, so its body has ALREADY been passed; this
+                    # only happens for a malformed/unterminated region. Treat
+                    # as a marker to stay resilient.
                     continue
                 if (tok.startswith('#') and len(tok) > 1
                         and tok not in self.signals and tok not in self._bit_map):
                     v = _parse_vcd_timestamp_token(tok)
-                    if v is not None and (best is None or v > best):
-                        best = v
-            if best is not None:
-                t_max = best
-                break
-            if offset <= safe_data_offset:
-                break  # whole data section scanned; genuinely no timestamp
-            buf_size *= 2
-
-        # If the whole data section was scanned above without a hit, there is no
-        # top-level timestamp; t_max degrades to t_min below rather than masking
-        # the miss. (A >4 MB tail with no timestamp is malformed and left as-is.)
+                    if v is not None:
+                        t_max = v
+                        break
+            end = start
         if t_max is None:
             t_max = t_min
         if t_min is None:
@@ -2102,6 +2196,7 @@ def _public_row(row, verbose=False):
 
 
 def cmd_info(vcd, args):
+    _limit(args, 'info')
     t_min, t_max = vcd.scan_time_range()
     ts = vcd.ts_sec
     synth = [s for s in vcd.signals.values() if s.get('synthesized')]
@@ -2155,7 +2250,10 @@ def cmd_info(vcd, args):
             print('Signals   : {} unique ({} $var refs via aliases)'.format(
                 r['signal_count'], r['reference_count']))
         print('Types     : {}'.format(', '.join('{}={}'.format(k, v) for k, v in r['var_types'].items())))
-        print('Time      : {} ~ {} ({})'.format(r['time_min'], r['time_max'], r['duration']))
+        if r['time_min'] is None:
+            print('Time      : (no data in file)')
+        else:
+            print('Time      : {} ~ {} ({})'.format(r['time_min'], r['time_max'], r['duration']))
         for s in r['scopes']:
             print('  scope: {}'.format(s))
         if r['comments'] and getattr(args, 'verbose', False):
@@ -2485,32 +2583,38 @@ def cmd_search(vcd, args):
             if cur_t is None:
                 cur_t = t
             if t != cur_t:
-                # Process completed group at cur_t
-                changed = set()
+                # Process completed group at cur_t. Every event in the group
+                # is evaluated individually (in order): intra-timestamp runs
+                # like 0->1->0 expose each transition, not just the net
+                # change. state is updated per event so the condition sees
+                # the post-change value at each step; a timestamp emits at
+                # most one result (the first matching step).
+                emitted = False
                 for gsid, gval in group:
                     old_val = state.get(gsid)
-                    if cur_t == 0 and old_val is None:
-                        pass
-                    elif vcd.signals[gsid].get('type') == 'event':
-                        changed.add(gsid)
-                    elif old_val is None:
-                        pass
-                    elif old_val != gval:
-                        changed.add(gsid)
-                for gsid, gval in group:
+                    # A change is: an event-var trigger (every record counts),
+                    # or a real value transition. First observations are not
+                    # changes (t=0 initialization and a signal's first ever
+                    # value), matching the pre-1.3.20 contract.
+                    is_change = (
+                        vcd.signals[gsid].get('type') == 'event'
+                        or (old_val is not None and old_val != gval)
+                    )
                     state[gsid] = gval
-
-                if changed_sid in changed and _conditions_hold(state, conditions):
-                    values, meta = _show_values(vcd, state, show_sids, verbose)
-                    event = {'time_ticks': cur_t, 'time_h': fmt_time(cur_t, ts),
-                             'values': values}
-                    if verbose:
-                        event['meta'] = meta
-                    total += 1
-                    if limit != 0 and len(events) >= limit:
-                        truncated = True
-                        break
-                    events.append(event)
+                    if not is_change or emitted:
+                        continue
+                    if gsid == changed_sid and _conditions_hold(state, conditions):
+                        values, meta = _show_values(vcd, state, show_sids, verbose)
+                        event = {'time_ticks': cur_t, 'time_h': fmt_time(cur_t, ts),
+                                 'values': values}
+                        if verbose:
+                            event['meta'] = meta
+                        total += 1
+                        if limit != 0 and len(events) >= limit:
+                            truncated = True
+                            break
+                        events.append(event)
+                        emitted = True
 
                 if truncated:
                     break
@@ -2518,33 +2622,31 @@ def cmd_search(vcd, args):
                 group = []
             group.append((sid, val))
 
-        # Process final pending group
+        # Process final pending group (same per-event semantics as above)
         if group and not truncated:
             t = cur_t
-            changed = set()
+            emitted = False
             for gsid, gval in group:
                 old_val = state.get(gsid)
-                if t == 0 and old_val is None:
-                    pass
-                elif vcd.signals[gsid].get('type') == 'event':
-                    changed.add(gsid)
-                elif old_val is None:
-                    pass
-                elif old_val != gval:
-                    changed.add(gsid)
-            for gsid, gval in group:
+                is_change = (
+                    vcd.signals[gsid].get('type') == 'event'
+                    or (old_val is not None and old_val != gval)
+                )
                 state[gsid] = gval
-            if changed_sid in changed and _conditions_hold(state, conditions):
-                values, meta = _show_values(vcd, state, show_sids, verbose)
-                event = {'time_ticks': t, 'time_h': fmt_time(t, ts),
-                         'values': values}
-                if verbose:
-                    event['meta'] = meta
-                total += 1
-                if limit != 0 and len(events) >= limit:
-                    truncated = True
-                else:
-                    events.append(event)
+                if not is_change or emitted:
+                    continue
+                if gsid == changed_sid and _conditions_hold(state, conditions):
+                    values, meta = _show_values(vcd, state, show_sids, verbose)
+                    event = {'time_ticks': t, 'time_h': fmt_time(t, ts),
+                             'values': values}
+                    if verbose:
+                        event['meta'] = meta
+                    total += 1
+                    if limit != 0 and len(events) >= limit:
+                        truncated = True
+                    else:
+                        events.append(event)
+                    emitted = True
 
         if args.json:
             obj = {'mode': 'event', 'condition': cond_label,
@@ -2829,7 +2931,8 @@ def main():
     sp.add_argument('--show', metavar='PAT1,PAT2,...', type=_normalize_filter_patterns,
                     help='signals to display while the condition holds; output segments split when shown values change')
     sp.add_argument('--changed', metavar='PATTERN',
-                    help='emit events only when this signal really changes; VCD event vars count each trigger; must match exactly one signal')
+                    help='emit events only when this signal really changes; VCD event vars count each trigger; must match exactly one signal; '
+                         '--condition is evaluated on the post-change state (e.g. "a=1" reports edges into 1)')
 
     args = p.parse_args()
     if not args.cmd:

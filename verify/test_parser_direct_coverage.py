@@ -289,3 +289,67 @@ def test_scan_time_range_plain_tail(tmp_path):
         '#0\n0!\n#500\n1!\n#700\n0!\n'))
     v = va.VCDParser(str(p))
     assert v.scan_time_range() == (0, 700)
+
+
+def test_scan_time_range_last_timestamp_after_large_region_free_run(tmp_path):
+    # An ordinary value_change run (no $sections) larger than the scan window
+    # sits BEFORE the last timestamp: #0, >4 MiB of changes, then #100 near
+    # EOF. The reverse tail scan must start each window's region state from the
+    # top level carried out of EOF; the earlier code instead assumed any window
+    # not reaching the data start opened *inside* a skip region, so it skipped
+    # the whole first window and reported the earlier #0 as t_max.
+    p = write_vcd(
+        tmp_path,
+        "$timescale 1ns $end\n$var wire 1 ! s $end\n$enddefinitions $end\n"
+        "#0\n0!\n",
+        'deeptail.vcd',
+    )
+    with open(p, 'a', newline='\n') as f:
+        f.write('1!\n0!\n' * 800000)   # ~4.6 MiB of ordinary value changes
+        f.write('#100\n1!\n0!\n')
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 100)
+
+
+def test_scan_time_range_trailing_dumpall(tmp_path):
+    # $dumpall/$dumpon/$dumpvars ARE $kw..$end sections. Walked in reverse the
+    # closing $end enters a region that the opening $dumpall must EXIT; treating
+    # the dump keyword as a bare marker leaks the skip backward over the real
+    # last timestamp.
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#10\n1!\n#42\n$dumpall\n1!\n$end\n'))
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (10, 42)
+
+
+def test_scan_time_range_trailing_dumpon(tmp_path):
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#10\n1!\n#42\n$dumpon\n1!\n$end\n'))
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (10, 42)
+
+
+def test_scan_time_range_timestamp_split_across_window_boundary(tmp_path):
+    # A fixed-size tail read can cut a '#<digits>' token at the window edge.
+    # The low fragment must be stitched onto the next (lower) window, or a
+    # truncated '#12345...' is misread as a smaller but still-valid timestamp.
+    window = 4 * 1024 * 1024
+    prefix = ("$timescale 1ns $end\n$var wire 1 ! s $end\n"
+              "$enddefinitions $end\n#500\n0!\n")
+    big = "#123456789\n"          # 11 bytes; the true last timestamp
+    # Land the split 5 bytes into `big` so the boundary cuts "#1234" | "56789":
+    #   split = file_size - window must equal len(prefix) + 5
+    #   file_size = len(prefix) + len(big) + len(tail)  =>  len(tail) = window - 6
+    tail_len = window - (len(big) - 5)
+    unit = "1!\n0!\n"
+    tail = unit * (tail_len // len(unit))
+    tail += " " * (tail_len - len(tail))   # whitespace pad to the exact length
+    p = tmp_path / "split.vcd"
+    with open(p, "w", newline="\n") as f:
+        f.write(prefix)
+        f.write(big)
+        f.write(tail)
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (500, 123456789)

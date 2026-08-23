@@ -174,6 +174,35 @@ def test_event_var_counts_each_trigger(tmp_path, capsys):
     assert all(e['value'] == 'triggered' for e in r['events'])
 
 
+def test_search_changed_event_var_counts_each_trigger(tmp_path, capsys):
+    # search --changed must agree with dump: an event var triggering several
+    # times in one timestamp emits one event per trigger, not one per
+    # timestamp ("VCD event vars count each trigger").
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var event 1 $ ev $end\n',
+        '#10\n1$\n1$\n#20\n1$\n'))
+    v = va.VCDParser(str(p))
+    va.cmd_search(v, ns(json=True, condition='ev=1', changed='ev',
+                        begin='0ns', end='30ns', limit=0))
+    r = load_json_stdout(capsys.readouterr().out)
+    assert [e['time_ticks'] for e in r['events']] == [10, 10, 20]
+
+
+def test_search_changed_level_signal_multiple_matches_per_timestamp(tmp_path, capsys):
+    # A level signal can satisfy the condition on more than one transition in
+    # the same timestamp: 0->1->0->1 with condition s=1 matches both rising
+    # steps at #10, so search emits #10 twice (one per matching transition),
+    # consistent with dump's "count each change".
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#5\n0!\n#10\n1!\n0!\n1!\n#20\n0!\n'))
+    v = va.VCDParser(str(p))
+    va.cmd_search(v, ns(json=True, condition='s=1', changed='s',
+                        begin='0ns', end='30ns', limit=0))
+    r = load_json_stdout(capsys.readouterr().out)
+    assert [e['time_ticks'] for e in r['events']] == [10, 10]
+
+
 def test_snapshot_semantics_last_write_wins(tmp_path, capsys):
     # Snapshot reports state at a time: last write within the timestamp wins.
     p = write_vcd(tmp_path, minimal_vcd(

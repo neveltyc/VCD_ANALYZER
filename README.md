@@ -10,7 +10,7 @@
   <img alt="Version" src="https://img.shields.io/badge/version-1.3.20-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-88%20collected-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-94%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -97,11 +97,13 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 ## Semantics notes
 
-- **Every value change is preserved.** The IEEE 1364 grammar allows several
-  value changes to the same signal within one timestamp (delta-cycle style
-  writers); `dump` shows all of them in order. Consecutive identical runs
-  coalesce, and `$dumpall`/`$dumpon` checkpoints re-emitting the current value
-  do not add change events (so `summary` static/active accounting stays exact).
+- **Multiple value changes per timestamp are preserved.** The IEEE 1364 grammar
+  allows several value changes to the same signal within one timestamp
+  (delta-cycle style writers); `dump` shows all of them in order and `summary`
+  counts each transition. A record that only re-asserts a signal's current
+  value — a consecutive duplicate, or a `$dumpall`/`$dumpon` checkpoint
+  re-emitting the current value — is a no-op and adds no change event (so
+  `summary` static/active accounting stays exact).
 - **`search --changed` conditions are evaluated on the post-change state** —
   the value after the transition at that timestamp. `"a=1"` reports rising
   edges into 1; `"a!=0"` reports a 0→1 edge.

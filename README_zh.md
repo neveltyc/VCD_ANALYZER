@@ -10,7 +10,7 @@
   <img alt="Version" src="https://img.shields.io/badge/版本-1.3.20-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/测试-88%20collected-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/测试-94%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -95,10 +95,11 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 ## 语义说明
 
-- **保留每一次值变化。** IEEE 1364 允许同一时间戳内对同一信号写多次
-  value change（delta-cycle 风格的仿真器）；`dump` 按顺序全部输出。
-  连续相同值会合并，`$dumpall`/`$dumpon` 检查点重发当前值不产生
-  变化事件（`summary` 的 static/active 统计保持精确）。
+- **保留同一时间戳内的多次值变化。** IEEE 1364 允许同一时间戳内对同一信号写多次
+  value change（delta-cycle 风格的仿真器）；`dump` 按顺序全部输出，`summary`
+  逐次计数。仅仅重复断言信号当前值的记录——连续的重复值，或
+  `$dumpall`/`$dumpon` 检查点重发当前值——属于 no-op，不产生变化事件
+  （`summary` 的 static/active 统计保持精确）。
 - **`search --changed` 的条件在跳变后的状态上求值** —— 即该时间戳上
   transition 之后的值。`"a=1"` 报告进入 1 的上升沿；`"a!=0"` 报告 0→1 跳变。
 - **时间窗口。** 不给 `--end` 时，有效终点是文件最后一个时间戳，

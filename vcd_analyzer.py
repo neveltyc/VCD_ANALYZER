@@ -64,11 +64,11 @@ Notes:
   snapshot/compare); a --begin past the last timestamp without --end is an
   error, while with --end it simply queries the extended window.
 
-  Value-change fidelity: every value_change in the file is preserved. Several
-  changes to the same signal within one timestamp (legal per IEEE 1364-2005,
-  e.g. delta-cycle style writers) are emitted in order, with consecutive
-  identical records coalesced; a $dumpall/$dumpon checkpoint re-emitting the
-  current value does not add a change event.
+  Value-change fidelity: multiple value changes to a signal within one
+  timestamp (legal per IEEE 1364-2005, e.g. delta-cycle style writers) are all
+  emitted, in order. A record that merely re-asserts a signal's current value
+  -- a consecutive duplicate, or a $dumpall/$dumpon checkpoint re-emitting the
+  current value -- is a no-op and adds no change event.
 """
 
 __version__ = '1.3.20'
@@ -654,6 +654,11 @@ _SIM_KEYWORDS = {'$dumpall', '$dumpoff', '$dumpon', '$dumpvars',
 # header and data; $vcdclose (18.3.6.1) wraps a final simulation time token.
 _DATA_SKIP_SECTIONS = {'$comment', '$vcdclose'}
 
+# ASCII whitespace byte values — the exact set bytes.split() (no separator)
+# breaks on. Used by the t_max tail scan to find token boundaries when
+# stitching a token split across a fixed-size read.
+_ASCII_WS_BYTES = frozenset(b' \t\n\r\f\v')
+
 
 class VCDParser:
     """Streaming VCD parser. Token-based: handles single-line and multi-line
@@ -1127,7 +1132,7 @@ class VCDParser:
             # Validating first and returning without consuming would leak a
             # malformed value's identifier back to the top level, where e.g.
             # 'b1012 1&' re-parses '1&' as a scalar change on signal '&' — a
-            # phantom event. See test_freeformat_1_3_19.py (B4).
+            # phantom event. See test_freeformat.py (B4).
             sym = next_token()
             if self._is_structural_token(sym):
                 if sym is not None:
@@ -1198,14 +1203,15 @@ class VCDParser:
         emitted at logical t=0 (typical case: $dumpvars block directly
         after $enddefinitions without a leading #0).
 
-        Every value_change is emitted: the IEEE 1364 grammar allows any
-        number of value_changes per simulation_time, and a writer may legally
-        emit several for the same identifier within one timestamp (delta-cycle
-        style dumps). Within one timestamp, consecutive identical records for
-        a signal coalesce (a '1a 1a' pair is one event); the previously
-        observed value is tracked across timestamp boundaries so a $dumpall/
-        $dumpon checkpoint re-emitting the current value stays a no-op (the
-        1.3.19 static/active accounting is preserved). Event variables are
+        Multiple value_changes per timestamp are emitted: the IEEE 1364
+        grammar allows any number of value_changes per simulation_time, and a
+        writer may legally emit several for the same identifier within one
+        timestamp (delta-cycle style dumps). A record that merely re-asserts a
+        signal's current value is a no-op and adds no event: consecutive
+        identical records for a signal coalesce (a '1a 1a' pair is one event),
+        and the previously observed value is tracked across timestamp
+        boundaries so a $dumpall/$dumpon checkpoint re-emitting the current
+        value stays a no-op (the 1.3.19 static/active accounting is preserved). Event variables are
         markers, not levels: every record counts ('VCD event variables count
         each trigger'). Snapshot/compare last-write-wins semantics are
         unchanged.
@@ -1496,97 +1502,93 @@ class VCDParser:
             t_min = 0
 
         # -- t_max: backward scan from EOF --
-        # Strategy: read the tail in 4 MiB windows from EOF and walk the
-        # tokens in REVERSE. The first top-level '#<digits>' met in reverse
-        # file order is the LAST timestamp, so the scan stops at the first
-        # hit and never degrades.
+        # Read the tail in fixed windows from EOF and walk each window's tokens
+        # in REVERSE. The first top-level '#<digits>' met in reverse file order
+        # is the LAST timestamp, so the scan stops at the first hit. A forward
+        # tail scan cannot do this: a legal VCD may carry an unbounded run of
+        # value_changes after the final '#T' (IEEE 1364-2005 places no bound on
+        # the value_change run per simulation_time), so a forward scan that gave
+        # up after one window would wrongly collapse t_max to t_min on exactly
+        # those files.
         #
-        # Why a reverse walk instead of forward chunk scans: a legal VCD may
-        # carry an unbounded number of value_changes after the final
-        # timestamp (IEEE 1364-2005 simulation_command allows arbitrary
-        # value_change runs per simulation_time; nothing caps a trailing
-        # same-timestamp region). A forward scan that stops after 4 MiB
-        # without a hit would silently collapse t_max to t_min on exactly
-        # those files; walking from EOF, the last timestamp is found as soon
-        # as the scan crosses it, no matter how much data follows it.
+        # Region skipping is the reverse dual of the forward skip-to-$end walk.
+        # In file order a section is  $kw {body} $end ; walked in reverse it is
+        # $end {body} $kw. So, in reverse:
+        #   * a '$end' ENTERS a region (we just crossed its closing marker);
+        #   * inside a region, body tokens are skipped and the region's opening
+        #     '$kw' EXITS it. This INCLUDES $dumpall/$dumpon/$dumpvars: those
+        #     ARE $kw..$end sections, and their value_change bodies carry no
+        #     '#T', so skipping them is harmless — but NOT exiting on them would
+        #     leak the skip backward over the real last timestamp (the earlier
+        #     '$dumpall stays in-region' rule did exactly that and swallowed it);
+        #   * a nested '$end' inside a region keeps us in-region (its own '$kw'
+        #     is consumed as part of the outer body).
+        # A '#<digits>' inside a '$comment'/'$vcdclose' body is therefore never
+        # read as a top-level timestamp — matching the forward parser and
+        # iter_events(), where '$vcdclose #T $end' wraps a simulation_time
+        # record, not a top-level timestamp. A '#<digits>' that is a declared
+        # identifier_code is excluded too.
         #
-        # Reverse section state machine. Forward, the grammar is
-        #   $kw {body tokens} $end
-        # so the token sequence in file order is $kw, body..., $end. Walked in
-        # REVERSE, the sequence is $end, body..., $kw — the mirror image:
-        #   top level:  a '$end' token ENTERS a region (we have just crossed
-        #               its closing marker; its body follows in reverse order)
-        #   in region:  body tokens are skipped; the region's OPENING '$kw'
-        #               token EXITS back to top level; a nested '$end' (a
-        #               region opened inside this one) keeps us in-region —
-        #               its body and '$kw' are consumed as outer body
-        # Consequence: a region's body is never read as top level, so a
-        # '#999' inside a trailing '$comment ... $end' is skipped, not
-        # misread as a timestamp. In the forward parser a bare '$end' at top
-        # level is inert; in reverse order a bare '$end' always closes some
-        # region (its '$kw' lies further back in file order), so treating
-        # every '$end' as a region entry is exact for well-formed files and
-        # degrades gracefully on malformed ones. A '$kw' met at top level in
-        # reverse order can only be the opening keyword of an unterminated
-        # region (its closing '$end' is missing); it is treated as a marker.
+        # State carries ACROSS windows. A well-formed VCD closes every section,
+        # so the file ends at top level and the first (EOF) window starts at top
+        # level; a region straddling a boundary keeps its skip state into the
+        # next window. (The earlier per-window reset assumed every partial
+        # window opened inside a region, which mis-skipped ordinary
+        # value_changes and collapsed t_max on region-free files > one window.)
         #
-        # $vcdclose is handled like any other region (body skipped to its
-        # $kw), exactly matching the forward parser and iter_events(): the
-        # '#T' inside '$vcdclose #T $end' is a simulation_time record, not a
-        # top-level timestamp, so it does not extend t_max.
-        #
-        # Window start: a partial window (start > data_offset) may begin
-        # mid-region — i.e. inside body tokens that continue before the
-        # window. The walk then starts in-region, so the body is skipped up
-        # to the region's opening '$kw'. A region longer than the whole
-        # window is the one unresolvable case; it only shifts the start, and
-        # the window is 4 MiB.
-        #
-        # Chunk boundaries: chunks are read as bytes and split on ASCII
-        # whitespace (VCD is an ASCII token stream; identifier_codes are
-        # printable ASCII), so a boundary can never split or merge tokens,
-        # regardless of multi-byte sequences in $comment bodies.
+        # A fixed-size read can also cut a token at the boundary, and a
+        # truncated '#123456' could pass as a valid but wrong '#123'. The
+        # non-whitespace fragment at each window's low edge is held back and
+        # stitched onto the next (lower) window, so a split token is reassembled
+        # before it is ever classified.
         file_size = os.path.getsize(self.path)
         # _data_offset may be a text-mode tell() cookie (opaque, potentially
         # larger than file_size); clamp to a safe floor for binary seek.
         safe_data_offset = self._data_offset if self._data_offset < file_size else 0
         window = min(4 * 1024 * 1024, max(file_size - safe_data_offset, 0))
         t_max = None
+        inside = False          # region-skip state, carried across windows
+        carry = b''             # boundary token fragment from the higher window
         end = file_size
         while window > 0 and end > safe_data_offset and t_max is None:
             start = max(safe_data_offset, end - window)
             with open(self.path, 'rb') as f:
                 f.seek(start)
                 data = f.read(end - start)
+            # Stitch the fragment carried from the higher (already scanned)
+            # window onto our high edge, completing the token that boundary cut.
+            if carry:
+                data += carry
+                carry = b''
             if not data:
                 break
-            toks = data.split()
-            inside = start > safe_data_offset
-            for tok_b in reversed(toks):
+            # Unless this window reaches the data-section start, its own low
+            # edge may cut a token; hold that leading fragment back for the next
+            # (lower) window rather than classifying a partial token.
+            if start > safe_data_offset:
+                i = 0
+                n = len(data)
+                while i < n and data[i] not in _ASCII_WS_BYTES:
+                    i += 1
+                carry = data[:i]
+                data = data[i:]
+            for tok_b in reversed(data.split()):
                 tok = tok_b.decode('ascii', errors='replace')
                 if inside:
-                    # In-region (reverse): skip body tokens until the region's
-                    # opening '$kw' exits us. A '$end' here is a nested
-                    # region's closing marker — stay in-region (its body and
-                    # '$kw' will be consumed as part of the outer body skip).
-                    if tok.startswith('$') and not tok.startswith('$end'):
-                        # '$kw' opening keyword of (the outermost open) region
-                        if tok not in _SIM_KEYWORDS:
-                            inside = False
-                    continue
-                if tok in _SIM_KEYWORDS:
-                    # $dumpvars etc. are bare markers in both directions.
+                    # Skip body tokens until the region's opening '$kw' exits;
+                    # a nested '$end' (region opened inside this one) stays
+                    # in-region, its '$kw' consumed as part of the outer body.
+                    if tok.startswith('$') and tok != '$end':
+                        inside = False
                     continue
                 if tok == '$end':
                     # Closing marker of a region whose body follows (reverse).
                     inside = True
                     continue
-                if tok.startswith('$'):
-                    # A $kw at top level in reverse order opens a region whose
-                    # body lies toward file start — but we are walking toward
-                    # file start, so its body has ALREADY been passed; this
-                    # only happens for a malformed/unterminated region. Treat
-                    # as a marker to stay resilient.
+                if tok in _SIM_KEYWORDS or tok.startswith('$'):
+                    # A '$kw' met at top level in reverse order is the opener of
+                    # an unterminated region (its '$end' is missing); treat as a
+                    # marker to stay resilient on malformed files.
                     continue
                 if (tok.startswith('#') and len(tok) > 1
                         and tok not in self.signals and tok not in self._bit_map):
@@ -2583,13 +2585,14 @@ def cmd_search(vcd, args):
             if cur_t is None:
                 cur_t = t
             if t != cur_t:
-                # Process completed group at cur_t. Every event in the group
-                # is evaluated individually (in order): intra-timestamp runs
-                # like 0->1->0 expose each transition, not just the net
-                # change. state is updated per event so the condition sees
-                # the post-change value at each step; a timestamp emits at
-                # most one result (the first matching step).
-                emitted = False
+                # Process completed group at cur_t. Every event in the group is
+                # evaluated individually (in order): intra-timestamp runs like
+                # 0->1->0 expose each transition, not just the net change. state
+                # is updated per event so the condition sees the post-change
+                # value at each step, and every qualifying step emits — an event
+                # var counts each trigger, and a level signal can satisfy the
+                # condition on more than one transition in the same timestamp,
+                # matching dump's "count each change".
                 for gsid, gval in group:
                     old_val = state.get(gsid)
                     # A change is: an event-var trigger (every record counts),
@@ -2601,7 +2604,7 @@ def cmd_search(vcd, args):
                         or (old_val is not None and old_val != gval)
                     )
                     state[gsid] = gval
-                    if not is_change or emitted:
+                    if not is_change:
                         continue
                     if gsid == changed_sid and _conditions_hold(state, conditions):
                         values, meta = _show_values(vcd, state, show_sids, verbose)
@@ -2614,7 +2617,6 @@ def cmd_search(vcd, args):
                             truncated = True
                             break
                         events.append(event)
-                        emitted = True
 
                 if truncated:
                     break
@@ -2625,7 +2627,6 @@ def cmd_search(vcd, args):
         # Process final pending group (same per-event semantics as above)
         if group and not truncated:
             t = cur_t
-            emitted = False
             for gsid, gval in group:
                 old_val = state.get(gsid)
                 is_change = (
@@ -2633,7 +2634,7 @@ def cmd_search(vcd, args):
                     or (old_val is not None and old_val != gval)
                 )
                 state[gsid] = gval
-                if not is_change or emitted:
+                if not is_change:
                     continue
                 if gsid == changed_sid and _conditions_hold(state, conditions):
                     values, meta = _show_values(vcd, state, show_sids, verbose)
@@ -2644,9 +2645,8 @@ def cmd_search(vcd, args):
                     total += 1
                     if limit != 0 and len(events) >= limit:
                         truncated = True
-                    else:
-                        events.append(event)
-                    emitted = True
+                        break
+                    events.append(event)
 
         if args.json:
             obj = {'mode': 'event', 'condition': cond_label,

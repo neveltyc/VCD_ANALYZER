@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.20-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.4.0-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
   <img alt="Tests" src="https://img.shields.io/badge/tests-94%20passed-22aa55?style=flat-square">
@@ -60,7 +60,7 @@ Single file, no dependencies, Python 3.9+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.20/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.4.0/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
 python vcd_analyzer.py --version
@@ -156,6 +156,7 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 
 | Version | Highlight |
 |:--------|:----------|
+| `1.4.0` | Internal refactor: separate the event stream from derived state into three distinct parser views (`iter_events` raw / `iter_transitions` / `state_at` snapshots); no change to any command's output, value-change hot path slightly faster |
 | `1.3.20` | Preserve intra-timestamp value changes; rebuild `info`'s time range on one forward scanner (parser-parity, ~1.5× faster, survives huge/`$dumpall` tails); `search --changed` counts each change; `info` `--limit` validation and empty-data output |
 | `1.3.19` | Fix free-format VCD correctness: multi-declaration/timestamp-per-line, quiet-window search, rejected-token cascade, `$dumpall` change count |
 | `1.3.18` | Fix `info` `time_max` collapsing to `time_min` on indented VCD files |

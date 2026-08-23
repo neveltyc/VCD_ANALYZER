@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/版本-1.3.20-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/版本-1.4.0-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
   <img alt="Tests" src="https://img.shields.io/badge/测试-94%20passed-22aa55?style=flat-square">
@@ -58,7 +58,7 @@ python vcd_analyzer.py summary sim.vcd --filter dll_*
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.20/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.4.0/vcd_analyzer.py -o vcd_analyzer.py
 
 # 验证
 python vcd_analyzer.py --version
@@ -149,6 +149,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 | 版本 | 亮点 |
 |:------|:-----|
+| `1.4.0` | 内部重构:将事件流与派生状态分层为解析器的三个不同视图(`iter_events` 原始 / `iter_transitions` / `state_at` 快照);所有命令输出不变,值变化热路径略快 |
 | `1.3.20` | 保留同一时间戳内的多次值变化;`info` 时间范围改用单一前向扫描器(与解析器等价,约快 1.5×,能扛超大/`$dumpall` 尾部);`search --changed` 逐次计数;`info` 的 `--limit` 校验与空数据输出 |
 | `1.3.19` | 修复自由格式 VCD 正确性:一行多声明/多时间戳、静默窗口搜索、非法令牌级联、`$dumpall` 跳变计数 |
 | `1.3.18` | 修复 `info` 在缩进 VCD 文件上 `time_max` 塌缩为 `time_min` 的问题 |

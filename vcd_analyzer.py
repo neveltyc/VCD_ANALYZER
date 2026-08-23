@@ -71,7 +71,7 @@ Notes:
   current value -- is a no-op and adds no change event.
 """
 
-__version__ = '1.3.20'
+__version__ = '1.4.0'
 
 import sys
 import os
@@ -694,7 +694,7 @@ class VCDParser:
         # If $enddefinitions $end is followed by data tokens on the same
         # line(s) buffered by readline, those tokens replay first in data.
         self._initial_tokens = []
-        self._bit_map = {}          # sym -> (sig_id, bit_index)
+        self._bit_map = {}          # sym -> list of (sig_id, bit_index)
         self._bit_state_template = {}  # sig_id -> initial bit list for replay-local reassembly
         self._parse_header()
 
@@ -989,6 +989,31 @@ class VCDParser:
         for _sym, _name, _w, _bit_str, _sc, vtype in raw_vars:
             self.raw_type_counts[vtype] += 1
 
+        # Precomputed signal "kind" — the single source of truth for the
+        # event/state layering. Building these once here removes the per-event
+        # signals.get(sid)['type'] lookup that _iter_changes' no-op bypass used
+        # to pay on the value-change hot path, and lets the transition stream
+        # carry a first-class kind so consumers (summary/search) no longer
+        # re-derive type == 'event' themselves.
+        #   _event_sids: sids whose declared var_type is 'event' (markers, not
+        #     levels) — event triggers bypass no-op coalescing; each one counts.
+        #   _sid_kind:   sid -> {'event','real','vector','scalar'}, from declared
+        #     type + width (synthesized bit-buses are vectors).
+        self._event_sids = frozenset(
+            sid for sid, _info in self.signals.items()
+            if _info.get('type') == 'event')
+        self._sid_kind = {}
+        for _sid, _info in self.signals.items():
+            _vt = _info.get('type')
+            if _vt == 'event':
+                self._sid_kind[_sid] = 'event'
+            elif _vt in ('real', 'realtime'):
+                self._sid_kind[_sid] = 'real'
+            elif _info.get('width', 1) > 1 or _info.get('synthesized'):
+                self._sid_kind[_sid] = 'vector'
+            else:
+                self._sid_kind[_sid] = 'scalar'
+
     def match(self, keywords):
         """Return set of sig_ids matching any pattern, or None for all.
 
@@ -1026,16 +1051,6 @@ class VCDParser:
                 if hit:
                     break
         return out
-
-    def _data_tokens(self):
-        """Generator yielding all tokens from the data section."""
-        for t in self._initial_tokens:
-            yield t
-        with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
-            f.seek(self._data_offset)
-            for line in f:
-                for t in line.split():
-                    yield t
 
     def _data_token_lists(self, chunk_size=None):
         """Yield successive non-empty token batches from the data section.
@@ -1325,6 +1340,34 @@ class VCDParser:
         each trigger'). Snapshot/compare last-write-wins semantics are
         unchanged.
         """
+        for time, sid, _prev, val in self._iter_changes(t0, t1, sids):
+            yield time, sid, val
+
+    def iter_transitions(self, t0=0, t1=None, sids=None):
+        """Per-signal transition stream: yield (time, sid, prev, value, kind).
+
+        Same ordering and no-op/event semantics as iter_events, but each event
+        also carries the previously observed value (prev; None on first
+        observation) and the precomputed signal kind ('event'/'real'/'vector'/
+        'scalar'), so consumers (summary, search) need not track prior state or
+        re-derive type themselves. This is the TRANSITIONS view of the change
+        stream.
+        """
+        sid_kind = self._sid_kind
+        for time, sid, prev, val in self._iter_changes(t0, t1, sids):
+            yield time, sid, prev, val, sid_kind[sid]
+
+    def _iter_changes(self, t0=0, t1=None, sids=None):
+        """Core change stream: yield (time, sid, prev, value) per value_change.
+
+        Single semantic core behind iter_events (drops prev),
+        iter_transitions (adds kind) and the state_* folds. Owns no-op
+        coalescing, cross-timestamp last_val persistence, event-variable
+        trigger counting, bit-exploded bus assembly, the t0 catch-up and
+        the sids laziness. See iter_events for the value-change fidelity
+        contract; prev is the value seen before this change (None on first
+        observation).
+        """
         cur_t = 0
         pending = []       # ordered [(sid, val), ...] — preserves intra-timestamp order
         last_val = {}      # sid -> previously observed value (no-op suppression)
@@ -1332,12 +1375,13 @@ class VCDParser:
         def _record(sid, val):
             # Append unless this is a no-op re-assertion of the previously
             # observed value. Event variables skip the check: their records
-            # are trigger markers and each one counts.
-            sinfo = self.signals.get(sid)
-            is_event = sinfo is not None and sinfo.get('type') == 'event'
-            if not is_event and last_val.get(sid) == val:
+            # are trigger markers and each one counts. prev (the value seen
+            # before this change, or None on first observation) rides along
+            # so the transition view need not recompute it.
+            prev = last_val.get(sid)
+            if sid not in self._event_sids and prev == val:
                 return
-            pending.append((sid, val))
+            pending.append((sid, prev, val))
             last_val[sid] = val
 
         def _flush():
@@ -1441,8 +1485,8 @@ class VCDParser:
                         # Malformed (e.g. '#1.5'); silently skip per round-7 policy.
                         continue
                     if cur_t >= t0:
-                        for sid, val in _flush():
-                            yield cur_t, sid, val
+                        for sid, prev, val in _flush():
+                            yield cur_t, sid, prev, val
                     cur_t = new_t
                     if t1 is not None and cur_t > t1:
                         return
@@ -1481,7 +1525,7 @@ class VCDParser:
                     continue
 
                 # Catch-up before t0: update bit_state only, don't emit.
-                # Standalone state is owned by callers (e.g. _build_snapshot
+                # Standalone state is owned by callers (e.g. state_at
                 # accumulates it from yielded events), so nothing to do here
                 # for the standalone case — the continue is correct.
                 if cur_t < t0:
@@ -1535,8 +1579,8 @@ class VCDParser:
 
             # Final flush
             if cur_t >= t0:
-                for sid, val in _flush():
-                    yield cur_t, sid, val
+                for sid, prev, val in _flush():
+                    yield cur_t, sid, prev, val
         finally:
             close = getattr(list_iter, 'close', None)
             if close is not None:
@@ -1632,6 +1676,44 @@ class VCDParser:
             t_min = t_max
         return t_min, t_max
 
+    def state_at(self, t_at, sids=None):
+        """Settled signal state at t_at: {sig_id: value} for known signals.
+
+        Last-write-wins fold of the change stream through t_at (inclusive).
+        Only signals with an observed value appear; no unknowns are invented.
+        This is the STATE@T view used by snapshot and as a baseline.
+        """
+        state = {}
+        for _t, sid, val in self.iter_events(0, t_at, sids):
+            state[sid] = val
+        return state
+
+    def state_before(self, t_at, sids=None):
+        """Settled state strictly before t_at (exclusive).
+
+        VCD timestamps are integer ticks, so the exclusive snapshot is the
+        inclusive snapshot at t_at - 1; before t=0 there is no prior state.
+        """
+        if t_at <= 0:
+            return {}
+        return self.state_at(t_at - 1, sids)
+
+    def state_pair(self, ta, tb, sids=None):
+        """Settled state at ta and at tb in one pass (assumes ta <= tb).
+
+        Returns (state_a, state_b), each {sig_id: value} = last value at or
+        before the respective boundary (inclusive). Used by compare.
+        """
+        state = {}
+        state_a = None
+        for t, sid, val in self.iter_events(0, tb, sids):
+            if state_a is None and t > ta:
+                state_a = dict(state)
+            state[sid] = val
+        if state_a is None:
+            state_a = dict(state)
+        return state_a, dict(state)
+
 
 
 # -- Subcommands -------------------------------------------------------------
@@ -1702,46 +1784,6 @@ def _fmt_maybe(value, info):
 def _time_pair(prefix, t, ts):
     """Return both integer ticks and human-readable time for JSON outputs."""
     return {prefix + '_ticks': t, prefix + '_h': fmt_time(t, ts) if t is not None else None}
-
-
-def _build_snapshot(vcd, t_at, sids=None):
-    """Replay from start through t_at, return known {sig_id: value} only."""
-    state = {}
-    for _t, sid, val in vcd.iter_events(0, t_at, sids):
-        state[sid] = val
-    return state
-
-
-def _build_snapshot_before(vcd, t_at, sids=None):
-    """Replay from start up to, but excluding, t_at.
-
-    Used by search --changed. A value_change exactly at --begin must remain
-    observable as a transition. Because VCD timestamps are integer ticks, the
-    exclusive snapshot is simply the inclusive snapshot at t_at - 1. At t=0
-    there is no prior state; initialization is handled explicitly by the
-    changed-mode loop and is not reported as a real change.
-    """
-    if t_at <= 0:
-        return {}
-    return _build_snapshot(vcd, t_at - 1, sids)
-
-
-def _build_snapshot_pair(vcd, ta, tb, sids=None):
-    """Build snapshots at ta and tb in a single iter_events pass.
-
-    Assumes ta <= tb. Returns (snapshot_a, snapshot_b) where each is
-    {sid: value} at the corresponding boundary (last value at or before
-    the given time, inclusive).
-    """
-    state = {}
-    snapshot_a = None
-    for t, sid, val in vcd.iter_events(0, tb, sids):
-        if snapshot_a is None and t > ta:
-            snapshot_a = dict(state)
-        state[sid] = val
-    if snapshot_a is None:
-        snapshot_a = dict(state)
-    return snapshot_a, dict(state)
 
 
 def _parse_target_value(text):
@@ -2127,7 +2169,7 @@ def _summary_rows(vcd, t0, t1, sids):
     selected = _selected_sids(vcd, sids)
     init_boundary = 0 if t0 == 0 else t0 - 1
 
-    # Baseline: {sid: val} — cheap str overwrites, same as _build_snapshot.
+    # Baseline: {sid: val} — cheap str overwrites, same as state_at.
     # Stats dicts are created only once per signal, not on every baseline event.
     baseline = {}
     stats = {}
@@ -2138,13 +2180,12 @@ def _summary_rows(vcd, t0, t1, sids):
             'changes': 0, 'first_at': None, 'last_at': None,
             'initial': init_val, 'last': init_val,
             'unique': {init_val} if init_val is not None else set(),
-            'prev': init_val,
             'rise_count': 0 if is_scalar else None,
             'fall_count': 0 if is_scalar else None,
             'scalar': is_scalar,
         }
 
-    for t, sid, val in vcd.iter_events(0, t1, selected):
+    for t, sid, prev, val, _kind in vcd.iter_transitions(0, t1, selected):
         if t <= init_boundary:
             baseline[sid] = val
             continue
@@ -2156,12 +2197,14 @@ def _summary_rows(vcd, t0, t1, sids):
             stats[sid] = _make_stats(vcd.signals[sid], init_val)
 
         s = stats[sid]
-        prev = s['prev']
-        # Count genuine transitions only. $dumpall/$dumpon checkpoints re-emit
-        # every signal's current value even when unchanged; a redundant
-        # same-value record must not inflate 'changes' (which would flip a
-        # never-changing signal from static to active). A same-value record also
-        # leaves first_at/last_at/last/unique untouched — they already reflect it.
+        # Count genuine transitions only. prev (carried by the transition
+        # stream) is the value observed just before this change; on the first
+        # in-window event it equals the baseline value, so a $dumpall/$dumpon
+        # checkpoint re-emitting the current value (prev == val) is not counted
+        # and a never-changing signal stays static. Repeated event-variable
+        # triggers at the same value are likewise not double-counted here — dump
+        # and search --changed expose each trigger; summary counts genuine value
+        # transitions.
         if val != prev:
             if s['scalar']:
                 if prev == '0' and val == '1':
@@ -2173,7 +2216,6 @@ def _summary_rows(vcd, t0, t1, sids):
                 s['first_at'] = t
             s['last_at'] = t
             s['last'] = val
-            s['prev'] = val
             s['unique'].add(val)
 
     # Signals that were in baseline but had no in-window events (static).
@@ -2483,7 +2525,7 @@ def cmd_snapshot(vcd, args):
     t_at = parse_time(args.at, ts)
     sids0 = vcd.match(args.filter)
     selected = _selected_sids(vcd, sids0)
-    state = _build_snapshot(vcd, t_at, selected)
+    state = vcd.state_at(t_at, selected)
     rows = []
     for sid in sorted(state, key=lambda s: vcd.signals[s]['path']):
         info = vcd.signals[sid]
@@ -2533,7 +2575,7 @@ def cmd_compare(vcd, args):
     if tb < ta:
         raise _TimeParseError('second compare time must be >= first compare time')
     sids = vcd.match(args.filter)
-    sa, sb = _build_snapshot_pair(vcd, ta, tb, sids)
+    sa, sb = vcd.state_pair(ta, tb, sids)
     diffs = []
     for sid in sorted(set(sa) | set(sb), key=lambda s: vcd.signals[s]['path']):
         va, vb = sa.get(sid), sb.get(sid)
@@ -2594,88 +2636,43 @@ def cmd_search(vcd, args):
     cond_text = _condition_result_text(conditions)
 
     if changed_sid is not None:
-        # Single-pass: build state < t0, then process events t0..t1.
+        # Single-pass over the transition stream: fold state < t0 (baseline),
+        # then evaluate each in-window change. prev (old value) and kind come
+        # from the stream, so there is no per-timestamp regrouping and no
+        # re-derivation of type == 'event' here — the change stream already
+        # applies event-trigger and no-op semantics.
         state = {}
         events = []
         total = 0
         truncated = False
-        cur_t = None
-        group = []
 
-        for t, sid, val in vcd.iter_events(0, t1, selected):
+        for t, sid, prev, val, kind in vcd.iter_transitions(0, t1, selected):
             if t < t0:
-                # Baseline: build state up to (but not including) t0.
-                # Last-write-wins semantics, matching _build_snapshot_before.
+                # Baseline: settled state up to (but not including) t0.
                 state[sid] = val
                 continue
 
-            # Event processing phase: group by timestamp, process each group
-            # before updating state (so old_val reflects pre-step state).
-            if cur_t is None:
-                cur_t = t
-            if t != cur_t:
-                # Process completed group at cur_t. Every event in the group is
-                # evaluated individually (in order): intra-timestamp runs like
-                # 0->1->0 expose each transition, not just the net change. state
-                # is updated per event so the condition sees the post-change
-                # value at each step, and every qualifying step emits — an event
-                # var counts each trigger, and a level signal can satisfy the
-                # condition on more than one transition in the same timestamp,
-                # matching dump's "count each change".
-                for gsid, gval in group:
-                    old_val = state.get(gsid)
-                    # A change is: an event-var trigger (every record counts),
-                    # or a real value transition. First observations are not
-                    # changes (t=0 initialization and a signal's first ever
-                    # value), matching the pre-1.3.20 contract.
-                    is_change = (
-                        vcd.signals[gsid].get('type') == 'event'
-                        or (old_val is not None and old_val != gval)
-                    )
-                    state[gsid] = gval
-                    if not is_change:
-                        continue
-                    if gsid == changed_sid and _conditions_hold(state, conditions):
-                        values, meta = _show_values(vcd, state, show_sids, verbose)
-                        event = {'time_ticks': cur_t, 'time_h': fmt_time(cur_t, ts),
-                                 'values': values}
-                        if verbose:
-                            event['meta'] = meta
-                        total += 1
-                        if limit != 0 and len(events) >= limit:
-                            truncated = True
-                            break
-                        events.append(event)
-
-                if truncated:
+            # A change is an event-var trigger (every record counts) or a real
+            # value transition; a first observation (prev is None) is not a
+            # change, matching the pre-1.3.20 contract. Intra-timestamp runs like
+            # 0->1->0 expose each transition (the stream yields each in order),
+            # and state is updated per event so the condition sees the
+            # post-change value at each step; every qualifying step emits.
+            is_change = (kind == 'event') or (prev is not None and prev != val)
+            state[sid] = val
+            if not is_change:
+                continue
+            if sid == changed_sid and _conditions_hold(state, conditions):
+                values, meta = _show_values(vcd, state, show_sids, verbose)
+                event = {'time_ticks': t, 'time_h': fmt_time(t, ts),
+                         'values': values}
+                if verbose:
+                    event['meta'] = meta
+                total += 1
+                if limit != 0 and len(events) >= limit:
+                    truncated = True
                     break
-                cur_t = t
-                group = []
-            group.append((sid, val))
-
-        # Process final pending group (same per-event semantics as above)
-        if group and not truncated:
-            t = cur_t
-            for gsid, gval in group:
-                old_val = state.get(gsid)
-                is_change = (
-                    vcd.signals[gsid].get('type') == 'event'
-                    or (old_val is not None and old_val != gval)
-                )
-                state[gsid] = gval
-                if not is_change:
-                    continue
-                if gsid == changed_sid and _conditions_hold(state, conditions):
-                    values, meta = _show_values(vcd, state, show_sids, verbose)
-                    event = {'time_ticks': t, 'time_h': fmt_time(t, ts),
-                             'values': values}
-                    if verbose:
-                        event['meta'] = meta
-                    total += 1
-                    if limit != 0 and len(events) >= limit:
-                        truncated = True
-                        break
-                    events.append(event)
+                events.append(event)
 
         if args.json:
             obj = {'mode': 'event', 'condition': cond_label,
@@ -2722,17 +2719,21 @@ def cmd_search(vcd, args):
         results.append(row)
         return False
 
-    cur_t = None
-    group = []
     active = False
     seg_start = None
     seg_values = None
     seg_meta = None
     init_checks_done = False
 
-    for t, sid, val in vcd.iter_events(0, t1, selected):
-        if t <= t0:
-            state[sid] = val
+    # Interval mode is a STATE-per-timestamp query (unlike --changed's per-event
+    # evaluation): _event_groups yields every value_change at one timestamp as a
+    # group, which is applied together before the condition is evaluated once on
+    # the resulting settled state. Reusing it removes the hand-rolled cur_t/group
+    # regrouping and its duplicate 'final pending group' tail.
+    for gt, ggroup in _event_groups(vcd, 0, t1, selected):
+        if gt <= t0:
+            for gsid, gval in ggroup:
+                state[gsid] = gval
             continue
 
         if not init_checks_done:
@@ -2742,95 +2743,29 @@ def cmd_search(vcd, args):
                 seg_values, seg_meta = _show_values(vcd, state, show_sids, verbose)
             init_checks_done = True
 
-        # Group by timestamp beyond t0
-        if cur_t is None:
-            cur_t = t
-        if t != cur_t:
-            # Apply accumulated group values to state before checking
-            for gsid, gval in group:
-                state[gsid] = gval
-            # Process completed group at cur_t
-            cond_ok = _conditions_hold(state, conditions)
-            if not has_show:
-                if cond_ok and not active:
-                    active = True
-                    seg_start = cur_t
-                elif not cond_ok and active:
-                    if append_result(emit_interval(seg_start, cur_t)):
-                        break
-                    active = False
-                    seg_start = None
-            else:
-                if not cond_ok:
-                    if active:
-                        row = emit_interval(seg_start, cur_t)
-                        row['values'] = seg_values
-                        if verbose:
-                            row['meta'] = seg_meta
-                        if append_result(row):
-                            break
-                        active = False
-                        seg_start = None
-                        seg_values = None
-                        seg_meta = None
-                else:
-                    new_values, new_meta = _show_values(vcd, state, show_sids, verbose)
-                    if not active:
-                        active = True
-                        seg_start = cur_t
-                        seg_values = new_values
-                        seg_meta = new_meta
-                    elif new_values != seg_values:
-                        row = emit_interval(seg_start, cur_t)
-                        row['values'] = seg_values
-                        if verbose:
-                            row['meta'] = seg_meta
-                        if append_result(row):
-                            break
-                        seg_start = cur_t
-                        seg_values = new_values
-                        seg_meta = new_meta
-
-            if truncated:
-                break
-            cur_t = t
-            group = []
-        group.append((sid, val))
-
-    # If the selected signals produced no events in (t0, t1], the per-event init
-    # check above never ran, so a condition that already holds across an
-    # otherwise silent window would be missed (false "No interval"). Evaluate it
-    # now from the baseline state. group is empty in this case, so the block
-    # below is skipped and the final-interval emit reports the whole window.
-    if not init_checks_done:
-        active = _conditions_hold(state, conditions)
-        seg_start = t0 if active else None
-        if active and has_show:
-            seg_values, seg_meta = _show_values(vcd, state, show_sids, verbose)
-        init_checks_done = True
-
-    # Process final pending group
-    if group and not truncated:
-        for gsid, gval in group:
+        # Apply this timestamp's group, then evaluate the condition on the
+        # settled state.
+        for gsid, gval in ggroup:
             state[gsid] = gval
         cond_ok = _conditions_hold(state, conditions)
         if not has_show:
             if cond_ok and not active:
                 active = True
-                seg_start = cur_t
+                seg_start = gt
             elif not cond_ok and active:
-                if append_result(emit_interval(seg_start, cur_t)):
-                    pass
+                if append_result(emit_interval(seg_start, gt)):
+                    break
                 active = False
                 seg_start = None
         else:
             if not cond_ok:
                 if active:
-                    row = emit_interval(seg_start, cur_t)
+                    row = emit_interval(seg_start, gt)
                     row['values'] = seg_values
                     if verbose:
                         row['meta'] = seg_meta
-                    append_result(row)
+                    if append_result(row):
+                        break
                     active = False
                     seg_start = None
                     seg_values = None
@@ -2839,18 +2774,31 @@ def cmd_search(vcd, args):
                 new_values, new_meta = _show_values(vcd, state, show_sids, verbose)
                 if not active:
                     active = True
-                    seg_start = cur_t
+                    seg_start = gt
                     seg_values = new_values
                     seg_meta = new_meta
                 elif new_values != seg_values:
-                    row = emit_interval(seg_start, cur_t)
+                    row = emit_interval(seg_start, gt)
                     row['values'] = seg_values
                     if verbose:
                         row['meta'] = seg_meta
-                    append_result(row)
-                    seg_start = cur_t
+                    if append_result(row):
+                        break
+                    seg_start = gt
                     seg_values = new_values
                     seg_meta = new_meta
+
+    # If the selected signals produced no events in (t0, t1], the per-group init
+    # check above never ran, so a condition that already holds across an
+    # otherwise silent window would be missed (false "No interval"). Evaluate it
+    # now from the baseline state; with no groups the final-interval emit below
+    # reports the whole window.
+    if not init_checks_done:
+        active = _conditions_hold(state, conditions)
+        seg_start = t0 if active else None
+        if active and has_show:
+            seg_values, seg_meta = _show_values(vcd, state, show_sids, verbose)
+        init_checks_done = True
 
     # Emit final interval if still active
     if active and not truncated:

@@ -156,7 +156,7 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 
 | Version | Highlight |
 |:--------|:----------|
-| `1.3.20` | Preserve intra-timestamp value changes; `info` `t_max` survives >4 MiB same-timestamp tails; `--changed` post-change semantics documented; `info` `--limit` validation and empty-data output |
+| `1.3.20` | Preserve intra-timestamp value changes; rebuild `info`'s time range on one forward scanner (parser-parity, ~1.5× faster, survives huge/`$dumpall` tails); `search --changed` counts each change; `info` `--limit` validation and empty-data output |
 | `1.3.19` | Fix free-format VCD correctness: multi-declaration/timestamp-per-line, quiet-window search, rejected-token cascade, `$dumpall` change count |
 | `1.3.18` | Fix `info` `time_max` collapsing to `time_min` on indented VCD files |
 | `1.3.17` | Common-shape fast path in the `$var` parser (skip bracket scans) |

@@ -149,7 +149,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 | 版本 | 亮点 |
 |:------|:-----|
-| `1.3.20` | 保留同一时间戳内的多次值变化;`info` 的 `t_max` 在 >4 MiB 同时间戳尾部不再塌缩;文档化 `--changed` 的 post-change 语义;`info` 的 `--limit` 校验与空数据输出 |
+| `1.3.20` | 保留同一时间戳内的多次值变化;`info` 时间范围改用单一前向扫描器(与解析器等价,约快 1.5×,能扛超大/`$dumpall` 尾部);`search --changed` 逐次计数;`info` 的 `--limit` 校验与空数据输出 |
 | `1.3.19` | 修复自由格式 VCD 正确性:一行多声明/多时间戳、静默窗口搜索、非法令牌级联、`$dumpall` 跳变计数 |
 | `1.3.18` | 修复 `info` 在缩进 VCD 文件上 `time_max` 塌缩为 `time_min` 的问题 |
 | `1.3.17` | $var 解析器常见形态快路径(跳过括号扫描) |

@@ -1037,7 +1037,7 @@ class VCDParser:
                 for t in line.split():
                     yield t
 
-    def _data_token_lists(self):
+    def _data_token_lists(self, chunk_size=None):
         """Yield successive non-empty token batches from the data section.
 
         The buffered initial tokens (those that trailed ``$enddefinitions`` on
@@ -1049,11 +1049,17 @@ class VCDParser:
         token stream is byte-for-byte identical to line-based ``.split()`` —
         verified exhaustively against the line-based reference across chunk
         sizes and adversarial whitespace.
+
+        ``chunk_size`` overrides the read size. iter_events() uses the default
+        (large, env-tunable) chunk; scan_time_range()'s t_min passes a small
+        chunk and consumes lazily (it stops at the first ``#T``), so it never
+        reads more than the head it needs.
         """
         if self._initial_tokens:
             yield list(self._initial_tokens)
 
-        chunk_size = _env_int('VCD_ANALYZER_TOKEN_CHUNK_SIZE', 4 * 1024 * 1024)
+        if chunk_size is None:
+            chunk_size = _env_int('VCD_ANALYZER_TOKEN_CHUNK_SIZE', 4 * 1024 * 1024)
         if chunk_size < 65536:
             chunk_size = 65536
         carry = ''
@@ -1187,6 +1193,109 @@ class VCDParser:
             return sym, ''.join(_PORT_STATE[c] for c in state)
 
         return None
+
+    def _scan_timestamps(self, token_lists, stop_at_first=False, resync=False):
+        """Replay iter_events()'s top-level grammar over token_lists, ignoring
+        the values themselves, to extract timestamps for scan_time_range().
+
+        Returns ``(first_ts, saw_value_before_first_ts, last_ts)`` with each
+        ``#T`` parsed by the hardened ``_parse_vcd_timestamp_token``. This is
+        the single forward scanner shared by both ends of scan_time_range(),
+        finally making _consume_value_change()'s "shared with scan_time_range()"
+        contract true: info's time range is derived by exactly the rules
+        iter_events() parses with —
+
+          * ``$end`` and ``_SIM_KEYWORDS`` ($dumpvars/$dumpall/...) are
+            top-level markers; any other ``$section`` ($comment/$vcdclose/
+            unknown) has its body drained to the matching ``$end``;
+          * a top-level ``#<digits>`` is ALWAYS a timestamp (no
+            ``_is_structural_token`` gate at top level — matching iter_events);
+          * ``b``/``r``/``p`` value changes go through _consume_value_change(),
+            so a ``#<digits>`` that is a *declared identifier_code operand* is
+            consumed rather than miscounted, and a pushed-back structural
+            operand is re-read at top level exactly as the parser does.
+
+        ``stop_at_first`` returns at the first top-level ``#T`` (t_min, which
+        feeds tokens from ``_data_offset`` — a real top-level sync point).
+
+        ``resync`` (t_max tail windows only): the window may begin inside a
+        section body. Assume top level, but if a bare ``$end`` is met before any
+        ``$X`` opener has confirmed the sync, the window began inside a drained
+        section ($comment/$vcdclose) — discard the timestamps mis-read so far
+        and resume at top level after that ``$end``. Since t_max scans the whole
+        window and a trailing section's own ``$end`` is always inside an
+        EOF-anchored window, a section-body ``#<digits>`` can never survive as
+        the reported t_max.
+        """
+        pushback = []
+        it = iter(token_lists)
+        toks = ()
+        ntoks = 0
+        ti = 0
+
+        def _next():
+            nonlocal toks, ntoks, ti
+            if pushback:
+                return pushback.pop()
+            while ti >= ntoks:
+                nl = next(it, None)
+                if nl is None:
+                    return None
+                toks = nl
+                ntoks = len(nl)
+                ti = 0
+            tok = toks[ti]
+            ti += 1
+            return tok
+
+        first_ts = None
+        last_ts = None
+        saw_value = False
+        skipping = False        # inside a drained $comment/$vcdclose/unknown body
+        synced = not resync     # top-level sync confirmed (no pending resync)
+
+        while True:
+            tok = _next()
+            if tok is None:
+                break
+            if skipping:
+                if tok == '$end':
+                    skipping = False
+                continue
+            c0 = tok[0]
+            if c0 == '$':
+                if tok == '$end':
+                    if not synced:
+                        # Stray $end before any opener: the window began inside a
+                        # section body — drop what we mis-read and resync.
+                        first_ts = last_ts = None
+                        saw_value = False
+                        synced = True
+                    continue
+                # Any other '$X' is a real top-level structural marker.
+                synced = True
+                if tok in _SIM_KEYWORDS:
+                    continue
+                skipping = True     # $comment/$vcdclose/unknown -> drain to $end
+                continue
+            if c0 == '#' and len(tok) > 1 and tok[1].isdigit():
+                v = _parse_vcd_timestamp_token(tok)
+                if v is None:
+                    continue        # malformed (e.g. '#1.5'); tolerate
+                if first_ts is None:
+                    first_ts = v
+                last_ts = v
+                if stop_at_first:
+                    return first_ts, saw_value, last_ts
+                continue
+            # ---- value change (the value itself is irrelevant here) ----
+            if c0 in '01xXzZ' and len(tok) > 1:
+                saw_value = True
+            elif c0 in 'bBrRp':
+                if self._consume_value_change(tok, _next, pushback) is not None:
+                    saw_value = True
+            # else: stray token (bare '#', 'b', ...) — ignore
+        return first_ts, saw_value, last_ts
 
     def iter_events(self, t0=0, t1=None, sids=None):
         """Yield (time, sig_id, value_str) with bit reassembly.
@@ -1436,167 +1545,87 @@ class VCDParser:
     def scan_time_range(self):
         """Min/max timestamps in the file.
 
-        Uses a bidirectional strategy for large files:
-        - **t_min**: forward token scan from ``_data_offset`` — stops at the
-          first ``#T`` token (typically within the first few KB of data).  If
-          value changes appear before any timestamp (e.g. a $dumpvars block),
-          t_min = 0.  Non-value sections ($comment/$vcdclose) are skipped to
-          their matching $end, honouring a same-line $end.
-        - **t_max**: reverse token walk over 4 MiB tail windows from EOF.
-          The first top-level ``#<digits>`` met in reverse file order is the
-          last timestamp, so the scan stops at the first hit and never
-          degrades — legal files may carry an unbounded value_change run
-          after the final timestamp.  A ``#<digits>`` inside a $comment/
-          $vcdclose body, or one that is a declared identifier_code, is
-          excluded exactly as the parser does.
+        Both ends are found by a single FORWARD scanner, ``_scan_timestamps``,
+        which replays iter_events()'s top-level grammar (see that method), so
+        info's time range is derived by exactly the parser's rules:
 
-        All ``#T`` parsing routes through the hardened
-        ``_parse_vcd_timestamp_token`` (bounded digit length, int64 cap) so a
-        hostile timestamp yields a clean CLI error instead of a raw traceback,
-        matching iter_events().
+        - **t_min**: forward scan from ``_data_offset`` — a real top-level sync
+          point — stopping at the first top-level ``#T`` (typically within the
+          first few KB). Value changes, or a ``$dumpvars`` block, before any
+          ``#T`` yield t_min = 0.
+        - **t_max**: the same forward scanner over a *small tail window* read
+          from EOF, grown geometrically until a top-level ``#T`` is found. The
+          last ``#T`` in file order is the last timestamp — matching
+          iter_events()'s final ``cur_t`` (which ``_search_end_time`` relies on
+          as the implicit search end). A legal VCD may carry an unbounded
+          value_change run, or a large ``$dumpall`` checkpoint, after the final
+          ``#T``; grow-on-miss covers that. A window that begins inside a
+          section body is handled by the scanner's resync, and the final grow
+          reaches the data-section floor — a provably-correct full forward scan
+          that the old reverse walk never had.
 
-        This avoids a full sequential scan of the data section, reducing
-        ``info`` on a 500 MB VCD from ~90 s to < 0.1 s.
+        Reading only a bounded tail (``VCD_ANALYZER_TAIL_WINDOW``, default
+        64 KiB, doubled on a miss) keeps ``info`` on a 500 MB VCD to well under
+        a second instead of the ~90 s a full sequential scan would cost. All
+        ``#T`` parsing routes through the hardened ``_parse_vcd_timestamp_token``
+        (bounded digits, int64 cap), so a hostile timestamp yields a clean CLI
+        error rather than a raw traceback.
+
+        (Replaces a reverse tail walk that reconstructed VCD grammar backwards
+        from an arbitrary offset — a recurring source of correctness bugs. The
+        forward scanner is provably equal to the event stream; see
+        ``_scan_timestamps``. ``_DATA_SKIP_SECTIONS`` stays documentation-only:
+        the "any ``$X`` that is not ``$end``/``$dump*``" drain rule matches
+        iter_events() exactly.)
         """
-        # -- t_min: forward token scan --
-        # Flat token walk with an explicit skip flag, mirroring iter_events():
-        # a single-line '$comment .. $end' closes on its own $end token rather
-        # than over-skipping subsequent lines (which would swallow the real
-        # first timestamp and report a wrong t_min).
-        t_min = None
-        saw_initial_data = False
-        skipping = False
-        with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
-            f.seek(self._data_offset)
-            for line in f:
-                for tok in line.split():
-                    if skipping:
-                        if tok == '$end':
-                            skipping = False
-                        continue
-                    if tok == '$end' or tok in _SIM_KEYWORDS:
-                        if tok == '$dumpvars':
-                            saw_initial_data = True
-                        continue
-                    if tok.startswith('$'):
-                        # $comment/$vcdclose/other: skip its body to the matching
-                        # $end (same-line or later), then resume token scanning.
-                        skipping = True
-                        continue
-                    if tok.startswith('#') and len(tok) > 1:
-                        v = _parse_vcd_timestamp_token(tok)
-                        if v is None:
-                            continue  # malformed (e.g. '#1.5'); tolerate
-                        t_min = 0 if saw_initial_data else v
-                        break
-                    # Value change before first timestamp. Only lowercase 'p' is
-                    # a real extended-VCD opener; the parser never emits for
-                    # uppercase 'P', so it must not count as initial data.
-                    c = tok[0]
-                    if c in '01xzXZbBrRp' and len(tok) >= 2:
-                        saw_initial_data = True
-                if t_min is not None:
-                    break
+        # -- t_min: forward scan from the data-section start, stop at first #T --
+        # Small lazy chunks (not iter_events' large read): _scan_timestamps
+        # returns at the first top-level #T, so only the head is read. close()
+        # releases the generator's file handle once we stop pulling from it.
+        head = self._data_token_lists(chunk_size=64 * 1024)
+        try:
+            first_ts, saw_value, _ = self._scan_timestamps(head, stop_at_first=True)
+        finally:
+            head.close()
+        t_min = 0 if saw_value else first_ts
 
-        if t_min is None and saw_initial_data:
-            t_min = 0
-
-        # -- t_max: backward scan from EOF --
-        # Read the tail in fixed windows from EOF and walk each window's tokens
-        # in REVERSE. The first top-level '#<digits>' met in reverse file order
-        # is the LAST timestamp, so the scan stops at the first hit. A forward
-        # tail scan cannot do this: a legal VCD may carry an unbounded run of
-        # value_changes after the final '#T' (IEEE 1364-2005 places no bound on
-        # the value_change run per simulation_time), so a forward scan that gave
-        # up after one window would wrongly collapse t_max to t_min on exactly
-        # those files.
-        #
-        # Region skipping is the reverse dual of the forward skip-to-$end walk.
-        # In file order a section is  $kw {body} $end ; walked in reverse it is
-        # $end {body} $kw. So, in reverse:
-        #   * a '$end' ENTERS a region (we just crossed its closing marker);
-        #   * inside a region, body tokens are skipped and the region's opening
-        #     '$kw' EXITS it. This INCLUDES $dumpall/$dumpon/$dumpvars: those
-        #     ARE $kw..$end sections, and their value_change bodies carry no
-        #     '#T', so skipping them is harmless — but NOT exiting on them would
-        #     leak the skip backward over the real last timestamp (the earlier
-        #     '$dumpall stays in-region' rule did exactly that and swallowed it);
-        #   * a nested '$end' inside a region keeps us in-region (its own '$kw'
-        #     is consumed as part of the outer body).
-        # A '#<digits>' inside a '$comment'/'$vcdclose' body is therefore never
-        # read as a top-level timestamp — matching the forward parser and
-        # iter_events(), where '$vcdclose #T $end' wraps a simulation_time
-        # record, not a top-level timestamp. A '#<digits>' that is a declared
-        # identifier_code is excluded too.
-        #
-        # State carries ACROSS windows. A well-formed VCD closes every section,
-        # so the file ends at top level and the first (EOF) window starts at top
-        # level; a region straddling a boundary keeps its skip state into the
-        # next window. (The earlier per-window reset assumed every partial
-        # window opened inside a region, which mis-skipped ordinary
-        # value_changes and collapsed t_max on region-free files > one window.)
-        #
-        # A fixed-size read can also cut a token at the boundary, and a
-        # truncated '#123456' could pass as a valid but wrong '#123'. The
-        # non-whitespace fragment at each window's low edge is held back and
-        # stitched onto the next (lower) window, so a split token is reassembled
-        # before it is ever classified.
+        # -- t_max: forward scan over a bounded EOF tail window, grow on miss --
+        # Forward scanning (not reverse grammar reconstruction) gives exact
+        # parity with iter_events(). The small initial window keeps the common
+        # case — the last #T sits a few KB before EOF — cheap; grow-on-miss
+        # covers a large trailing value_change run or $dumpall checkpoint. Each
+        # grow re-reads a strictly larger EOF window and rescans from scratch,
+        # so no cross-window carry/skip state is needed.
         file_size = os.path.getsize(self.path)
-        # _data_offset may be a text-mode tell() cookie (opaque, potentially
-        # larger than file_size); clamp to a safe floor for binary seek.
-        safe_data_offset = self._data_offset if self._data_offset < file_size else 0
-        window = min(4 * 1024 * 1024, max(file_size - safe_data_offset, 0))
+        # _data_offset may be a text-mode tell() cookie (opaque, possibly larger
+        # than file_size); clamp to a safe floor for the binary tail read.
+        floor = self._data_offset if self._data_offset < file_size else 0
+        window = _env_int('VCD_ANALYZER_TAIL_WINDOW', 64 * 1024)
+        if window < 1:
+            window = 1
         t_max = None
-        inside = False          # region-skip state, carried across windows
-        carry = b''             # boundary token fragment from the higher window
-        end = file_size
-        while window > 0 and end > safe_data_offset and t_max is None:
-            start = max(safe_data_offset, end - window)
+        while t_max is None:
+            start = max(floor, file_size - window)
             with open(self.path, 'rb') as f:
                 f.seek(start)
-                data = f.read(end - start)
-            # Stitch the fragment carried from the higher (already scanned)
-            # window onto our high edge, completing the token that boundary cut.
-            if carry:
-                data += carry
-                carry = b''
-            if not data:
-                break
-            # Unless this window reaches the data-section start, its own low
-            # edge may cut a token; hold that leading fragment back for the next
-            # (lower) window rather than classifying a partial token.
-            if start > safe_data_offset:
-                i = 0
+                data = f.read(file_size - start)
+            if start > floor:
+                # The low edge may cut a token; drop the leading partial
+                # fragment. Safe: if it held the only #T this window "misses"
+                # and the next (larger) window re-reads it intact.
+                j = 0
                 n = len(data)
-                while i < n and data[i] not in _ASCII_WS_BYTES:
-                    i += 1
-                carry = data[:i]
-                data = data[i:]
-            for tok_b in reversed(data.split()):
-                tok = tok_b.decode('ascii', errors='replace')
-                if inside:
-                    # Skip body tokens until the region's opening '$kw' exits;
-                    # a nested '$end' (region opened inside this one) stays
-                    # in-region, its '$kw' consumed as part of the outer body.
-                    if tok.startswith('$') and tok != '$end':
-                        inside = False
-                    continue
-                if tok == '$end':
-                    # Closing marker of a region whose body follows (reverse).
-                    inside = True
-                    continue
-                if tok in _SIM_KEYWORDS or tok.startswith('$'):
-                    # A '$kw' met at top level in reverse order is the opener of
-                    # an unterminated region (its '$end' is missing); treat as a
-                    # marker to stay resilient on malformed files.
-                    continue
-                if (tok.startswith('#') and len(tok) > 1
-                        and tok not in self.signals and tok not in self._bit_map):
-                    v = _parse_vcd_timestamp_token(tok)
-                    if v is not None:
-                        t_max = v
-                        break
-            end = start
+                while j < n and data[j] not in _ASCII_WS_BYTES:
+                    j += 1
+                data = data[j:]
+            toks = data.decode('ascii', errors='replace').split()
+            _, _, last = self._scan_timestamps([toks], resync=(start > floor))
+            if last is not None:
+                t_max = last
+                break
+            if start <= floor:
+                break            # whole data section scanned: no top-level #T
+            window *= 2          # grow-on-miss
         if t_max is None:
             t_max = t_min
         if t_min is None:

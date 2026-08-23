@@ -292,12 +292,11 @@ def test_scan_time_range_plain_tail(tmp_path):
 
 
 def test_scan_time_range_last_timestamp_after_large_region_free_run(tmp_path):
-    # An ordinary value_change run (no $sections) larger than the scan window
-    # sits BEFORE the last timestamp: #0, >4 MiB of changes, then #100 near
-    # EOF. The reverse tail scan must start each window's region state from the
-    # top level carried out of EOF; the earlier code instead assumed any window
-    # not reaching the data start opened *inside* a skip region, so it skipped
-    # the whole first window and reported the earlier #0 as t_max.
+    # Real-scale correctness: an ordinary value_change run larger than the tail
+    # window sits before the last timestamp (#0, ~4.6 MiB of changes, then #100
+    # near EOF). The forward tail scan finds #100 in the first EOF window; the
+    # old reverse walk mis-assumed a partial window opened inside a skip region
+    # and reported the earlier #0.
     p = write_vcd(
         tmp_path,
         "$timescale 1ns $end\n$var wire 1 ! s $end\n$enddefinitions $end\n"
@@ -312,10 +311,9 @@ def test_scan_time_range_last_timestamp_after_large_region_free_run(tmp_path):
 
 
 def test_scan_time_range_trailing_dumpall(tmp_path):
-    # $dumpall/$dumpon/$dumpvars ARE $kw..$end sections. Walked in reverse the
-    # closing $end enters a region that the opening $dumpall must EXIT; treating
-    # the dump keyword as a bare marker leaks the skip backward over the real
-    # last timestamp.
+    # $dumpall/$dumpon/$dumpvars are $kw..$end sections whose bodies are value
+    # changes (no #T); the forward scanner treats the keyword as a top-level
+    # marker, so the real last timestamp before them is retained.
     p = write_vcd(tmp_path, minimal_vcd(
         '$var wire 1 ! s $end\n',
         '#10\n1!\n#42\n$dumpall\n1!\n$end\n'))
@@ -331,25 +329,88 @@ def test_scan_time_range_trailing_dumpon(tmp_path):
     assert v.scan_time_range() == (10, 42)
 
 
-def test_scan_time_range_timestamp_split_across_window_boundary(tmp_path):
-    # A fixed-size tail read can cut a '#<digits>' token at the window edge.
-    # The low fragment must be stitched onto the next (lower) window, or a
-    # truncated '#12345...' is misread as a smaller but still-valid timestamp.
-    window = 4 * 1024 * 1024
-    prefix = ("$timescale 1ns $end\n$var wire 1 ! s $end\n"
-              "$enddefinitions $end\n#500\n0!\n")
-    big = "#123456789\n"          # 11 bytes; the true last timestamp
-    # Land the split 5 bytes into `big` so the boundary cuts "#1234" | "56789":
-    #   split = file_size - window must equal len(prefix) + 5
-    #   file_size = len(prefix) + len(big) + len(tail)  =>  len(tail) = window - 6
-    tail_len = window - (len(big) - 5)
-    unit = "1!\n0!\n"
-    tail = unit * (tail_len // len(unit))
-    tail += " " * (tail_len - len(tail))   # whitespace pad to the exact length
-    p = tmp_path / "split.vcd"
-    with open(p, "w", newline="\n") as f:
-        f.write(prefix)
-        f.write(big)
-        f.write(tail)
+def test_scan_time_range_grow_on_miss_env(tmp_path, monkeypatch):
+    # A trailing value_change run larger than the (tiny) window sits after the
+    # last #T. The first EOF window has no #T, so t_max must grow until it finds
+    # #100 rather than degrade to t_min. VCD_ANALYZER_TAIL_WINDOW forces the
+    # multi-window/grow path on a small fixture.
+    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '256')
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#0\n0!\n#100\n' + '1!\n0!\n' * 400))   # ~2.4 KiB tail >> 256 B window
     v = va.VCDParser(str(p))
-    assert v.scan_time_range() == (500, 123456789)
+    assert v.scan_time_range() == (0, 100)
+
+
+def test_scan_time_range_window_start_inside_comment_resync_env(tmp_path, monkeypatch):
+    # A tiny window lands inside a trailing $comment whose body holds a
+    # #<digits>. The stray-$end resync (a bare $end before any opener means the
+    # window began inside a section body) discards the body number, so t_max is
+    # the real last timestamp #42, not #999.
+    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '24')
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#0\n0!\n#42\n1!\n$comment note note #999 note note $end\n'))
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 42)
+
+
+def test_scan_time_range_window_start_inside_vcdclose_resync_env(tmp_path, monkeypatch):
+    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '16')
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#0\n0!\n#42\n1!\n$vcdclose #999 $end\n'))
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 42)
+
+
+def test_scan_time_range_boundary_split_timestamp_env(tmp_path, monkeypatch):
+    # A window boundary cutting a #<digits> must not yield a truncated but valid
+    # smaller timestamp: the leading partial fragment is dropped and a larger
+    # window re-reads the token intact. A tiny window forces the split.
+    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '8')
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#0\n0!\n#123456789\n1!\n'))
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 123456789)
+
+
+def test_scan_time_range_window_size_invariance(tmp_path, monkeypatch):
+    # The result must be identical whether the tail is read as one huge window
+    # (a single full forward scan from the data floor) or many tiny windows
+    # (multi-window + grow + resync). Mirrors the chunk-size differential test;
+    # each case also anchors its expected value.
+    cases = [
+        ('#0\n0!\n#100\n1!\n', (0, 100)),
+        ('#0\n0!\n#100\n', (0, 100)),                          # bare trailing #T (no event at 100)
+        ('$dumpvars\n0!\n$end\n#5\n1!\n#20\n0!\n', (0, 20)),   # $dumpvars -> t_min 0
+        ('1! #100 0!\n', (0, 100)),                            # value before first #T, mid-line #T
+        ('#0\n0!\n#42\n1!\n$comment note #999 note $end\n', (0, 42)),
+        ('#0\n0!\n#42\n1!\n$vcdclose #999 $end\n', (0, 42)),
+        ('#0\nb101 #5\n#100\n1!\n', (0, 100)),                 # #5 undeclared -> pushed-back timestamp
+    ]
+    for data, expected in cases:
+        p = write_vcd(tmp_path, minimal_vcd('$var wire 1 ! s $end\n', data), name='inv.vcd')
+        v = va.VCDParser(str(p))
+        monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '100000000')  # one full pass
+        big = v.scan_time_range()
+        monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '8')          # many tiny windows
+        small = v.scan_time_range()
+        assert big == small == expected, (data, big, small, expected)
+
+
+def test_scan_time_range_brp_operand_hash_parity(tmp_path):
+    # '#500' as a b-operand: declared -> it is the operand (timestamps 0,100);
+    # undeclared -> pushed back and read as a top-level timestamp 500. t_max is
+    # the last timestamp in file order, matching iter_events either way.
+    p1 = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 3 #500 bus $end\n$var wire 1 ! s $end\n',
+        '#0\n1!\n#100\nb101 #500\n'), name='declared.vcd')
+    v1 = va.VCDParser(str(p1))
+    assert v1.scan_time_range() == (0, 100)
+    p2 = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#0\n1!\n#100\nb101 #500\n'), name='undeclared.vcd')
+    v2 = va.VCDParser(str(p2))
+    assert v2.scan_time_range() == (0, 500)

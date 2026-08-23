@@ -7,10 +7,10 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.19-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.20-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-52/52%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-94%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -60,7 +60,7 @@ Single file, no dependencies, Python 3.9+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.18/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.3.20/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
 python vcd_analyzer.py --version
@@ -94,6 +94,23 @@ get raw tick counts (`_ticks`) alongside human-readable times (`_h`).
 python vcd_analyzer.py --json info sim.vcd
 python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ```
+
+## Semantics notes
+
+- **Multiple value changes per timestamp are preserved.** The IEEE 1364 grammar
+  allows several value changes to the same signal within one timestamp
+  (delta-cycle style writers); `dump` shows all of them in order and `summary`
+  counts each transition. A record that only re-asserts a signal's current
+  value — a consecutive duplicate, or a `$dumpall`/`$dumpon` checkpoint
+  re-emitting the current value — is a no-op and adds no change event (so
+  `summary` static/active accounting stays exact).
+- **`search --changed` conditions are evaluated on the post-change state** —
+  the value after the transition at that timestamp. `"a=1"` reports rising
+  edges into 1; `"a!=0"` reports a 0→1 edge.
+- **Time windows.** With no `--end`, the effective end is the file's last
+  timestamp, and a `--begin` past it is an error. With an explicit `--end`
+  beyond the last timestamp, the last known state is extended into the window
+  (the same last-known-value persistence used by `snapshot`/`compare`).
 
 ## Single file, zero dependencies
 
@@ -139,6 +156,7 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 
 | Version | Highlight |
 |:--------|:----------|
+| `1.3.20` | Preserve intra-timestamp value changes; rebuild `info`'s time range on one forward scanner (parser-parity, ~1.5× faster, survives huge/`$dumpall` tails); `search --changed` counts each change; `info` `--limit` validation and empty-data output |
 | `1.3.19` | Fix free-format VCD correctness: multi-declaration/timestamp-per-line, quiet-window search, rejected-token cascade, `$dumpall` change count |
 | `1.3.18` | Fix `info` `time_max` collapsing to `time_min` on indented VCD files |
 | `1.3.17` | Common-shape fast path in the `$var` parser (skip bracket scans) |

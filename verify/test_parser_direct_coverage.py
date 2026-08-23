@@ -52,6 +52,10 @@ def test_identifier_code_starting_with_hash_disambiguated(tmp_path):
 
 
 def test_keywords_and_vcdclose_do_not_pollute(tmp_path):
+    # Section bodies ($comment/$bogus/$vcdclose) must not leak their tokens
+    # into the event stream or the time range: #999, the bogus-body 1!, and
+    # the $vcdclose final-time record are all section content, not top-level
+    # timestamps or events.
     p = write_vcd(tmp_path, minimal_vcd('$var wire 1 ! a $end\n', '$comment #999 1! $end\n$bogus 1! $end\n#3\n1!\n$vcdclose #100 $end\n'))
     v = va.VCDParser(str(p))
     assert v.scan_time_range() == (3, 3)
@@ -129,7 +133,11 @@ def test_iter_events_filter_fast_path_keeps_synthesized_bus_updates(tmp_path):
     v = va.VCDParser(str(p))
     sids = v.match("bus[1:0]")
     events = [(t, v.signals[sid]["path"], val) for t, sid, val in v.iter_events(0, None, sids)]
+    # The bus is not a declared signal: bits arrive independently, so each bit
+    # update emits the current assembled value (unknown bits stay 'x') until
+    # all bits are known.
     assert events == [
+        (0, "tb.bus[1:0]", "x0"),
         (0, "tb.bus[1:0]", "10"),
         (10, "tb.bus[1:0]", "11"),
     ]
@@ -187,3 +195,222 @@ def test_scan_time_range_finds_last_timestamp_in_large_tail(tmp_path):
     )
     v = va.VCDParser(str(p))
     assert v.scan_time_range() == (0, 5999)
+
+
+def test_iter_events_preserves_intra_timestamp_transitions(tmp_path):
+    # IEEE 1364 allows several value_changes to the same identifier within one
+    # simulation_time (delta-cycle style writers). Every change is emitted;
+    # only consecutive identical runs coalesce.
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#10\n0!\n1!\n0!\n#20\n1!\n'))
+    v = va.VCDParser(str(p))
+    assert list(v.iter_events(0, None, None)) == [
+        (10, '!', '0'), (10, '!', '1'), (10, '!', '0'), (20, '!', '1')]
+
+
+def test_iter_events_coalesces_consecutive_duplicate_runs(tmp_path):
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#10\n1!\n1!\n0!\n'))
+    v = va.VCDParser(str(p))
+    assert list(v.iter_events(0, None, None)) == [
+        (10, '!', '1'), (10, '!', '0')]
+
+
+def test_iter_events_dumpall_checkpoint_not_emitted(tmp_path):
+    # $dumpall/$dumpon re-emit current values; a redundant same-value record
+    # is a no-op, not a change (keeps static signals static in summary).
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! a $end\n$var wire 1 " b $end\n',
+        '#0\n1!\n0"\n#5\n$dumpall\n1!\n0"\n$end\n#10\n0!\n'))
+    v = va.VCDParser(str(p))
+    events = list(v.iter_events(0, None, None))
+    assert (5, '!', '1') not in events
+    assert (5, '"', '0') not in events
+    assert (10, '!', '0') in events
+
+
+def test_iter_events_bit_bus_intra_timestamp(tmp_path):
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! bus [0] $end\n$var wire 1 " bus [1] $end\n',
+        '#10\n1!\n0"\n1!\n'))
+    v = va.VCDParser(str(p))
+    events = list(v.iter_events(0, None, None))
+    bus = [val for _t, sid, val in events if sid.startswith('__grp__')]
+    # bit0=1 -> 'x1'; bit1=0 -> '01'; bit0=1 again (same value, coalesced)
+    assert bus == ['x1', '01']
+    # Bit-select $var declarations are consumed by the synthesized bus, so no
+    # separate standalone events exist for the raw bits (pre-1.3.20 behavior).
+    assert not any(not sid.startswith('__grp__') for _t, sid, _val in events)
+
+
+def test_scan_time_range_tail_value_changes_beyond_window(tmp_path):
+    # IEEE 1364 places no bound on the number of value_changes after the final
+    # timestamp; a trailing same-timestamp region larger than the scan window
+    # must not collapse t_max to t_min.
+    p = write_vcd(
+        tmp_path,
+        "$timescale 1ns $end\n"
+        "$var wire 1 a clk $end\n"
+        "$enddefinitions $end\n"
+        "#0\n0a\n#100\n",
+        'bigtail.vcd',
+    )
+    with open(p, 'a', newline='\n') as f:
+        f.write('1a\n0a\n' * 2100000)  # ~8 MiB after the last #T
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 100)
+
+
+def test_scan_time_range_trailing_comment_excludes_body_timestamps(tmp_path):
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! clk $end\n',
+        '#0\n0!\n#42\n1!\n$comment tail #999 note $end\n'))
+    v = va.VCDParser(str(p))
+    # #999 inside the $comment body is not a timestamp
+    assert v.scan_time_range() == (0, 42)
+
+
+def test_scan_time_range_trailing_vcdclose(tmp_path):
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! clk $end\n',
+        '#0\n0!\n#42\n1!\n$vcdclose #999 $end\n'))
+    v = va.VCDParser(str(p))
+    # $vcdclose is a section like any other: its body (including the final
+    # simulation time record) is not top level, so t_max stays at the last
+    # real timestamp — matching the forward parser and iter_events().
+    assert v.scan_time_range() == (0, 42)
+
+
+def test_scan_time_range_plain_tail(tmp_path):
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! clk $end\n',
+        '#0\n0!\n#500\n1!\n#700\n0!\n'))
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 700)
+
+
+def test_scan_time_range_last_timestamp_after_large_region_free_run(tmp_path):
+    # Real-scale correctness: an ordinary value_change run larger than the tail
+    # window sits before the last timestamp (#0, ~4.6 MiB of changes, then #100
+    # near EOF). The forward tail scan finds #100 in the first EOF window; the
+    # old reverse walk mis-assumed a partial window opened inside a skip region
+    # and reported the earlier #0.
+    p = write_vcd(
+        tmp_path,
+        "$timescale 1ns $end\n$var wire 1 ! s $end\n$enddefinitions $end\n"
+        "#0\n0!\n",
+        'deeptail.vcd',
+    )
+    with open(p, 'a', newline='\n') as f:
+        f.write('1!\n0!\n' * 800000)   # ~4.6 MiB of ordinary value changes
+        f.write('#100\n1!\n0!\n')
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 100)
+
+
+def test_scan_time_range_trailing_dumpall(tmp_path):
+    # $dumpall/$dumpon/$dumpvars are $kw..$end sections whose bodies are value
+    # changes (no #T); the forward scanner treats the keyword as a top-level
+    # marker, so the real last timestamp before them is retained.
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#10\n1!\n#42\n$dumpall\n1!\n$end\n'))
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (10, 42)
+
+
+def test_scan_time_range_trailing_dumpon(tmp_path):
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#10\n1!\n#42\n$dumpon\n1!\n$end\n'))
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (10, 42)
+
+
+def test_scan_time_range_grow_on_miss_env(tmp_path, monkeypatch):
+    # A trailing value_change run larger than the (tiny) window sits after the
+    # last #T. The first EOF window has no #T, so t_max must grow until it finds
+    # #100 rather than degrade to t_min. VCD_ANALYZER_TAIL_WINDOW forces the
+    # multi-window/grow path on a small fixture.
+    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '256')
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#0\n0!\n#100\n' + '1!\n0!\n' * 400))   # ~2.4 KiB tail >> 256 B window
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 100)
+
+
+def test_scan_time_range_window_start_inside_comment_resync_env(tmp_path, monkeypatch):
+    # A tiny window lands inside a trailing $comment whose body holds a
+    # #<digits>. The stray-$end resync (a bare $end before any opener means the
+    # window began inside a section body) discards the body number, so t_max is
+    # the real last timestamp #42, not #999.
+    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '24')
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#0\n0!\n#42\n1!\n$comment note note #999 note note $end\n'))
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 42)
+
+
+def test_scan_time_range_window_start_inside_vcdclose_resync_env(tmp_path, monkeypatch):
+    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '16')
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#0\n0!\n#42\n1!\n$vcdclose #999 $end\n'))
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 42)
+
+
+def test_scan_time_range_boundary_split_timestamp_env(tmp_path, monkeypatch):
+    # A window boundary cutting a #<digits> must not yield a truncated but valid
+    # smaller timestamp: the leading partial fragment is dropped and a larger
+    # window re-reads the token intact. A tiny window forces the split.
+    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '8')
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#0\n0!\n#123456789\n1!\n'))
+    v = va.VCDParser(str(p))
+    assert v.scan_time_range() == (0, 123456789)
+
+
+def test_scan_time_range_window_size_invariance(tmp_path, monkeypatch):
+    # The result must be identical whether the tail is read as one huge window
+    # (a single full forward scan from the data floor) or many tiny windows
+    # (multi-window + grow + resync). Mirrors the chunk-size differential test;
+    # each case also anchors its expected value.
+    cases = [
+        ('#0\n0!\n#100\n1!\n', (0, 100)),
+        ('#0\n0!\n#100\n', (0, 100)),                          # bare trailing #T (no event at 100)
+        ('$dumpvars\n0!\n$end\n#5\n1!\n#20\n0!\n', (0, 20)),   # $dumpvars -> t_min 0
+        ('1! #100 0!\n', (0, 100)),                            # value before first #T, mid-line #T
+        ('#0\n0!\n#42\n1!\n$comment note #999 note $end\n', (0, 42)),
+        ('#0\n0!\n#42\n1!\n$vcdclose #999 $end\n', (0, 42)),
+        ('#0\nb101 #5\n#100\n1!\n', (0, 100)),                 # #5 undeclared -> pushed-back timestamp
+    ]
+    for data, expected in cases:
+        p = write_vcd(tmp_path, minimal_vcd('$var wire 1 ! s $end\n', data), name='inv.vcd')
+        v = va.VCDParser(str(p))
+        monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '100000000')  # one full pass
+        big = v.scan_time_range()
+        monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '8')          # many tiny windows
+        small = v.scan_time_range()
+        assert big == small == expected, (data, big, small, expected)
+
+
+def test_scan_time_range_brp_operand_hash_parity(tmp_path):
+    # '#500' as a b-operand: declared -> it is the operand (timestamps 0,100);
+    # undeclared -> pushed back and read as a top-level timestamp 500. t_max is
+    # the last timestamp in file order, matching iter_events either way.
+    p1 = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 3 #500 bus $end\n$var wire 1 ! s $end\n',
+        '#0\n1!\n#100\nb101 #500\n'), name='declared.vcd')
+    v1 = va.VCDParser(str(p1))
+    assert v1.scan_time_range() == (0, 100)
+    p2 = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#0\n1!\n#100\nb101 #500\n'), name='undeclared.vcd')
+    v2 = va.VCDParser(str(p2))
+    assert v2.scan_time_range() == (0, 500)

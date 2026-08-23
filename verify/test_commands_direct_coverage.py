@@ -111,3 +111,121 @@ def test_search_empty_vcd_error(tmp_path):
     v = va.VCDParser(str(p))
     with pytest.raises(va._ConditionParseError):
         va.cmd_search(v, ns(condition='a=1'))
+
+
+def test_dump_every_value_change_in_order(tmp_path, capsys):
+    # dump promises "every value change in a time window, in order": several
+    # changes to one signal at the same timestamp are all shown.
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#10\n0!\n1!\n0!\n#20\n1!\n'))
+    v = va.VCDParser(str(p))
+    va.cmd_dump(v, ns(json=False, limit=0))
+    out = capsys.readouterr().out
+    # Text rows are '  <path padded> = <value>'.
+    rows = [l for l in out.splitlines() if ' = ' in l]
+    vals = [r.split(' = ')[1].strip() for r in rows]
+    assert vals == ['0', '1', '0', '1']
+    assert all('tb.s' in r for r in rows)
+
+
+def test_summary_counts_intra_timestamp_transitions(tmp_path, capsys):
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#10\n0!\n1!\n0!\n#20\n1!\n'))
+    v = va.VCDParser(str(p))
+    va.cmd_summary(v, ns(json=True, begin='0ns', end='30ns'))
+    r = load_json_stdout(capsys.readouterr().out)
+    row = r['rows'][0]
+    # undef->0, 0->1, 1->0, 0->1
+    assert row['changes'] == 4
+    assert row['rise_count'] == 2
+    assert row['fall_count'] == 1
+
+
+def test_search_changed_detects_intra_timestamp_edge(tmp_path, capsys):
+    # A 0->1->0 run within one timestamp must not make the 0->1 edge vanish:
+    # the pre-1.3.20 per-timestamp dict coalesced the run to a net 0->0 "no
+    # change". With ordered events, each intra-timestamp transition is
+    # evaluated individually; the 0->1 at #10 satisfies s=1 (post-change)
+    # even though the group net is 0->0.
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#5\n0!\n#10\n1!\n0!\n#20\n1!\n'))
+    v = va.VCDParser(str(p))
+    va.cmd_search(v, ns(json=True, condition='s=1', changed='s',
+                        begin='0ns', end='30ns', limit=0))
+    r = load_json_stdout(capsys.readouterr().out)
+    assert [e['time_ticks'] for e in r['events']] == [10, 20]
+
+
+def test_event_var_counts_each_trigger(tmp_path, capsys):
+    # Event value_changes are markers: every record triggers, so the
+    # no-op-reassertion suppression that applies to level signals must not
+    # swallow repeated event markers (the pre-1.3.20 dumpall regression was
+    # specifically about event vars counting each trigger).
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var event 1 $ ev $end\n',
+        '#10\n1$\n1$\n#20\n1$\n'))
+    v = va.VCDParser(str(p))
+    va.cmd_dump(v, ns(json=True, limit=0))
+    r = load_json_stdout(capsys.readouterr().out)
+    assert [e['time_ticks'] for e in r['events']] == [10, 10, 20]
+    assert all(e['value'] == 'triggered' for e in r['events'])
+
+
+def test_search_changed_event_var_counts_each_trigger(tmp_path, capsys):
+    # search --changed must agree with dump: an event var triggering several
+    # times in one timestamp emits one event per trigger, not one per
+    # timestamp ("VCD event vars count each trigger").
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var event 1 $ ev $end\n',
+        '#10\n1$\n1$\n#20\n1$\n'))
+    v = va.VCDParser(str(p))
+    va.cmd_search(v, ns(json=True, condition='ev=1', changed='ev',
+                        begin='0ns', end='30ns', limit=0))
+    r = load_json_stdout(capsys.readouterr().out)
+    assert [e['time_ticks'] for e in r['events']] == [10, 10, 20]
+
+
+def test_search_changed_level_signal_multiple_matches_per_timestamp(tmp_path, capsys):
+    # A level signal can satisfy the condition on more than one transition in
+    # the same timestamp: 0->1->0->1 with condition s=1 matches both rising
+    # steps at #10, so search emits #10 twice (one per matching transition),
+    # consistent with dump's "count each change".
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#5\n0!\n#10\n1!\n0!\n1!\n#20\n0!\n'))
+    v = va.VCDParser(str(p))
+    va.cmd_search(v, ns(json=True, condition='s=1', changed='s',
+                        begin='0ns', end='30ns', limit=0))
+    r = load_json_stdout(capsys.readouterr().out)
+    assert [e['time_ticks'] for e in r['events']] == [10, 10]
+
+
+def test_snapshot_semantics_last_write_wins(tmp_path, capsys):
+    # Snapshot reports state at a time: last write within the timestamp wins.
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! s $end\n',
+        '#10\n0!\n1!\n0!\n'))
+    v = va.VCDParser(str(p))
+    va.cmd_snapshot(v, ns(json=True, at='10ns'))
+    r = load_json_stdout(capsys.readouterr().out)
+    assert r['known'] == 1
+    assert r['signals'][0]['value'] == '0'
+
+
+def test_info_rejects_negative_limit(tmp_path):
+    p = write_vcd(tmp_path, minimal_vcd('$var wire 1 ! s $end\n', '#0\n1!\n'))
+    v = va.VCDParser(str(p))
+    with pytest.raises(va._LimitParseError):
+        va.cmd_info(v, ns(json=False, limit=-5))
+
+
+def test_info_empty_data_text_has_no_none(tmp_path, capsys):
+    p = write_vcd(tmp_path, minimal_vcd('$var wire 1 ! s $end\n', ''))
+    v = va.VCDParser(str(p))
+    va.cmd_info(v, ns(json=False))
+    out = capsys.readouterr().out
+    assert 'None ~ None' not in out
+    assert '(no data in file)' in out

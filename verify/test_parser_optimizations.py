@@ -43,8 +43,15 @@ def test_chunk_tokenizer_matches_line_based_small_chunks(tmp_path, monkeypatch):
     monkeypatch.delenv('VCD_ANALYZER_TOKEN_CHUNK_SIZE', raising=False)
     b = _events(p)
     assert a == b
-    # Sanity: we got the expected number of value-change events (5 initial + 2000).
-    assert len(a) == 5 + 2000
+    # Sanity: every value change is an event (IEEE 1364 permits several
+    # changes per simulation_time): 5 initial + 1997 of 2000 timestamp
+    # events; the three that merely re-assert the initial value (k=0,2,4 all
+    # write '0' to signals already '0') are no-ops and stay suppressed.
+    assert len(a) == 5 + 1997
+    per_signal = {}
+    for _t, sid, _val in a:
+        per_signal[sid] = per_signal.get(sid, 0) + 1
+    assert per_signal == {'!': 400, '"': 401, '#': 400, '$': 401, '%': 400}
 
 
 def test_chunk_boundary_does_not_drop_dense_bus_changes(tmp_path):
@@ -72,7 +79,9 @@ def test_chunk_boundary_does_not_drop_dense_bus_changes(tmp_path):
         full = sum(1 for _t, s, _v in ev_all if s == code)
         filt = sum(1 for _t, s, _v in _events(p, {code}) if s == code)
         assert full == filt, 'alias {} lost events under filter'.format(code)
-        assert full == 1 + n  # 1 initial + n changes
+        # 1 initial + n timestamp changes, minus the k=0 change which merely
+        # re-asserts the initial '0' (no-op coalescing) -> n events.
+        assert full == n
 
 
 def test_no_trailing_newline_last_token_preserved(tmp_path):

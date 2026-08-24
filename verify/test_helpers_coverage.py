@@ -29,16 +29,24 @@ def test_safe_integer_and_timestamp_helpers():
 
 
 def test_value_parse_and_match_modes():
-    assert va._parse_target_value('10') == ('10', 10)
-    assert va._parse_target_value('0x0a') == ('0x0a', 10)
-    assert va._parse_target_value('b1010') == ('1010', 10)
-    assert va._parse_target_value('0b1x0') == ('1x0', None)
+    assert va._parse_target_value('10') == ('10', 10, None)
+    assert va._parse_target_value('0x0a') == ('0x0a', 10, None)
+    assert va._parse_target_value('b1010') == ('1010', 10, None)
+    assert va._parse_target_value('0b1x0') == ('1x0', None, None)
+    # A number with a fraction or exponent is a real target.
+    assert va._parse_target_value('3.14') == ('3.14', None, 3.14)
+    assert va._parse_target_value('1E-3') == ('1e-3', None, 0.001)
     with pytest.raises(va._ValueParseError):
         va._parse_target_value('0xfx')
     with pytest.raises(va._ValueParseError):
         va._parse_target_value('-1')
     with pytest.raises(va._ValueParseError):
         va._parse_target_value('')
+    # An opaque literal is rejected rather than kept as a never-equal target:
+    # this is what turns a mis-typed in-string OR into an error.
+    for bad in ('1 OR ack=1', 'IDLE', 'nan', 'inf'):
+        with pytest.raises(va._ValueParseError):
+            va._parse_target_value(bad)
     assert va._value_matches('00001010', '1010', 10, width=8)
     assert va._value_matches('0001x0', '1x0', None, width=6)
     assert not va._condition_match('x', '!=', '1', 1, width=1)

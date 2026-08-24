@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/版本-1.4.0-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/版本-1.5.0-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
   <img alt="Tests" src="https://img.shields.io/badge/测试-94%20passed-22aa55?style=flat-square">
@@ -42,6 +42,13 @@ python vcd_analyzer.py dump sim.vcd --begin 100ns --end 200ns --filter state
 # valid=1 且 ready=1 同时成立的时刻？
 python vcd_analyzer.py search sim.vcd --condition "valid=1,ready=1" --show data
 
+# ready 为低的时候 req 在哪些时刻跳变？
+python vcd_analyzer.py search sim.vcd --condition "changed(req),ready=0" --show state
+
+# 多个通道里任意一个握手的时刻？（重复 --condition 即 OR）
+python vcd_analyzer.py search sim.vcd --condition "ch0_valid=1,ch0_ready=1" \
+                                      --condition "ch1_valid=1,ch1_ready=1"
+
 # 17.55us 时刻所有信号的快照
 python vcd_analyzer.py snapshot sim.vcd --at 17.55us --filter state,init_done
 
@@ -58,7 +65,7 @@ python vcd_analyzer.py summary sim.vcd --filter dll_*
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.4.0/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.5.0/vcd_analyzer.py -o vcd_analyzer.py
 
 # 验证
 python vcd_analyzer.py --version
@@ -100,8 +107,20 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
   逐次计数。仅仅重复断言信号当前值的记录——连续的重复值，或
   `$dumpall`/`$dumpon` 检查点重发当前值——属于 no-op，不产生变化事件
   （`summary` 的 static/active 统计保持精确）。
-- **`search --changed` 的条件在跳变后的状态上求值** —— 即该时间戳上
-  transition 之后的值。`"a=1"` 报告进入 1 的上升沿；`"a!=0"` 报告 0→1 跳变。
+- **`search` 的条件是 AND 子句，重复 `--condition` 即 OR。** 一个 `--condition`
+  是逗号分隔的 AND 项列表，每项是 `SIG=VAL`、`SIG!=VAL` 或 `changed(SIG)`。
+  重复该标志后，任一子句成立的时刻即成立（OR-of-ANDs）——每个通道写一个子句，
+  就能找出"任意通道握手"的时刻。**不支持串内 OR**：条件字符串里的 `|` 和 `OR`
+  是普通文本并会被拒绝，所以误写的布尔表达式会报错，而不是给出一个看似确定的空结果。
+- **`changed(SIG)` 是边沿谓词**，在 SIG 跳变的那些时刻为真，并把 `search` 切换到
+  event 模式（报告时刻而非区间）。此时要么每个子句都带一个，要么都不带。
+  子句里的 level 项读取该 tick 的**结算态**，所以结果不依赖同刻记录的书写顺序；
+  而正在跳变的那个信号读取它**在该边沿上取到的值**，因此 `"changed(s),s=1"`
+  仍然表示"s 的上升沿"。`changed(a),changed(b)` 要求两者在同一 tick 跳变。
+- **条件匹配依据信号的声明类型。** real/realtime 信号按数值比较
+  （`dac=3.14`、`dac=100`），绝不按位串——否则它的 `%g` 文本会被读成二进制，
+  使 `dac=4` 匹配上一个值为 100.0 的 real。event 变量没有电平，
+  `ev=1` 会被拒绝并指向 `changed(ev)`。
 - **时间窗口。** 不给 `--end` 时，有效终点是文件最后一个时间戳，
   超出的 `--begin` 会报错。显式 `--end` 超过最后时间戳时，最后已知状态
   会延续到该窗口（与 `snapshot`/`compare` 的 last-known-value 语义一致）。
@@ -149,6 +168,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 | 版本 | 亮点 |
 |:------|:-----|
+| `1.5.0` | `changed(SIG)` 边沿谓词取代 `--changed` 标志;`--condition` 可重复以 OR 子句;条件匹配依据信号声明类型(修复 real 信号的假阳/假阴);无法成立的条件目标改为报错而非静默无匹配;`--limit` 默认值改为 500,截断提示更清晰 |
 | `1.4.0` | 内部重构:将事件流与派生状态分层为解析器的三个不同视图(`iter_events` 原始 / `iter_transitions` / `state_at` 快照);所有命令输出不变,值变化热路径略快 |
 | `1.3.20` | 保留同一时间戳内的多次值变化;`info` 时间范围改用单一前向扫描器(与解析器等价,约快 1.5×,能扛超大/`$dumpall` 尾部);`search --changed` 逐次计数;`info` 的 `--limit` 校验与空数据输出 |
 | `1.3.19` | 修复自由格式 VCD 正确性:一行多声明/多时间戳、静默窗口搜索、非法令牌级联、`$dumpall` 跳变计数 |

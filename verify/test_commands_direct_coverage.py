@@ -81,12 +81,12 @@ def test_cmd_search_interval_segment_event_direct(tmp_path, capsys):
     assert segs['mode'] == 'segment'
     assert [s['values']['tb.data'] for s in segs['segments']] == ['10 (0x0a)', '11 (0x0b)']
 
-    va.cmd_search(v, ns(json=True, condition='valid=1', changed='data', show='data,valid', limit=10))
+    va.cmd_search(v, ns(json=True, condition='changed(data),valid=1', show='data,valid', limit=10))
     ev = load_json_stdout(capsys.readouterr().out)
     assert ev['mode'] == 'event'
     assert [e['time_ticks'] for e in ev['events']] == [10, 15]
 
-    va.cmd_search(v, ns(json=True, condition='ev=1', changed='ev', limit=10))
+    va.cmd_search(v, ns(json=True, condition='changed(ev)', limit=10))
     ev2 = load_json_stdout(capsys.readouterr().out)
     assert [e['time_ticks'] for e in ev2['events']] == [30, 40]
 
@@ -153,7 +153,7 @@ def test_search_changed_detects_intra_timestamp_edge(tmp_path, capsys):
         '$var wire 1 ! s $end\n',
         '#5\n0!\n#10\n1!\n0!\n#20\n1!\n'))
     v = va.VCDParser(str(p))
-    va.cmd_search(v, ns(json=True, condition='s=1', changed='s',
+    va.cmd_search(v, ns(json=True, condition='changed(s),s=1',
                         begin='0ns', end='30ns', limit=0))
     r = load_json_stdout(capsys.readouterr().out)
     assert [e['time_ticks'] for e in r['events']] == [10, 20]
@@ -182,7 +182,7 @@ def test_search_changed_event_var_counts_each_trigger(tmp_path, capsys):
         '$var event 1 $ ev $end\n',
         '#10\n1$\n1$\n#20\n1$\n'))
     v = va.VCDParser(str(p))
-    va.cmd_search(v, ns(json=True, condition='ev=1', changed='ev',
+    va.cmd_search(v, ns(json=True, condition='changed(ev)',
                         begin='0ns', end='30ns', limit=0))
     r = load_json_stdout(capsys.readouterr().out)
     assert [e['time_ticks'] for e in r['events']] == [10, 10, 20]
@@ -197,7 +197,7 @@ def test_search_changed_level_signal_multiple_matches_per_timestamp(tmp_path, ca
         '$var wire 1 ! s $end\n',
         '#5\n0!\n#10\n1!\n0!\n1!\n#20\n0!\n'))
     v = va.VCDParser(str(p))
-    va.cmd_search(v, ns(json=True, condition='s=1', changed='s',
+    va.cmd_search(v, ns(json=True, condition='changed(s),s=1',
                         begin='0ns', end='30ns', limit=0))
     r = load_json_stdout(capsys.readouterr().out)
     assert [e['time_ticks'] for e in r['events']] == [10, 10]

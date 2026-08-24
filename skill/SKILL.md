@@ -14,8 +14,8 @@ All commands support `--json` for structured output. **Always use `--json` when 
 ## Setup (one-time)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.4.0/vcd_analyzer.py -o vcd_analyzer.py
-python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.4.0
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.5.0/vcd_analyzer.py -o vcd_analyzer.py
+python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.5.0
 ```
 
 No pip install, no virtualenv, no dependencies. Python 3.9+.
@@ -40,7 +40,7 @@ User wants to know...
 │   └─ search         → condition-based search with three sub-modes:
 │       ├─ interval   → time ranges where condition is true (no --show)
 │       ├─ segment    → intervals + observed signal values (with --show)
-│       └─ event      → per-change snapshots (with --changed)
+│       └─ event      → per-transition snapshots (with a changed(SIG) term)
 ```
 
 ## Command reference
@@ -50,7 +50,7 @@ User wants to know...
 | Option | Effect |
 |---|---|
 | `--json` | **Always use this.** Compact JSON to stdout. |
-| `--limit N` | Max results. Default 200. `--limit 0` = unlimited. |
+| `--limit N` | Max results. Default 500. `--limit 0` = unlimited. |
 | `--verbose` | Extra fields (width, type, raw values). Disables default limit. |
 
 ### Time argument format
@@ -134,7 +134,7 @@ Key JSON fields: `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`. Only signals 
 
 This is the most powerful command. Mode is selected by which options are present:
 
-#### Interval mode (no `--show`, no `--changed`)
+#### Interval mode (no `--show`, no `changed()`)
 
 "When is the condition true?"
 
@@ -157,30 +157,40 @@ Returns `segments[]` with `begin_h`, `end_h`, `values: {path: formatted_value}`.
 
 **This is the primary tool for protocol transaction extraction** — e.g., capturing every AXI handshake with its address and length.
 
-**Important:** the JSON output key differs by mode — `intervals` (no `--show`/`--changed`), `segments` (with `--show`), `events` (with `--changed`). Always check the `mode` field.
+**Important:** the JSON output key differs by mode — `intervals` (no `--show`/`changed()`), `segments` (with `--show`), `events` (with a `changed()` term). Always check the `mode` field.
 
-#### Event mode (with `--changed`)
+#### Event mode (with a `changed(SIG)` term)
 
-"Show me a snapshot each time a specific signal changes, while the condition holds."
+"Show me a snapshot each time a specific signal transitions, while the condition holds."
 
 ```bash
-python3 vcd_analyzer.py --json search <file> --changed data_out --condition "valid=1" --show data_out,valid
+python3 vcd_analyzer.py --json search <file> --condition "changed(data_out),valid=1" --show data_out,valid
 ```
 
-Returns `events[]` with `time_ticks`, `time_h`, `values: {path: formatted_value}`.
+Returns `events[]` with `time_ticks`, `time_h`, `values: {path: formatted_value}`, plus a `changed[]` array echoing the resolved edge signals.
 
-Each event fires when the `--changed` signal genuinely transitions (not initial assignment, not same-value re-dump). If `--show` is omitted, the changed signal itself becomes the show list.
+An event fires for each genuine transition of a `changed()` signal (not initial assignment, not a same-value re-dump, not `t=0` initialization) while the rest of that clause holds. If `--show` is omitted, the `changed()` signals become the show list.
 
-**Condition phase:** `--condition` is evaluated on the **post-change state** (the value after the transition at that timestamp). So `"a=1"` reports edges into 1, and `"a!=0"` reports a 0→1 edge. Do not read `--condition` as a filter on the pre-transition value.
+- **`changed(a),changed(b)`** requires both to transition on the **same tick**, and reports that tick once.
+- **Level terms read the tick's settled state**, so the result never depends on the order same-tick records happen to be written in. The transitioning signal itself reads the value it took **at that edge**, so `"changed(s),s=1"` means "rising edge of s" and `"changed(s),s!=0"` reports a 0→1 edge.
+- **Every clause must carry a `changed()` term, or none may.** Mixing is an error: a `changed()` clause fires at ticks while a level-only clause spans time.
 
 ### Condition syntax
 
-Comma-separated AND list. Each item: `SIGNAL=VALUE`, `SIGNAL==VALUE`, or `SIGNAL!=VALUE`.
+One `--condition` is a comma-separated **AND** clause. Each term is `SIGNAL=VALUE`, `SIGNAL==VALUE`, `SIGNAL!=VALUE`, or `changed(SIGNAL)`.
 
 - Signal pattern must match **exactly one** signal (use `list` first to find the right path).
-- Values: decimal (`5`, `255`), hex (`0xff`), binary (`b1010`, `0b1010`), 4-state (`b1x0z`), or the literal `x`/`z`.
+- Values: decimal (`5`, `255`), hex (`0xff`), binary (`b1010`, `0b1010`), 4-state (`b1x0z`), the literal `x`/`z`, or a real number (`3.14`, `1e-9`).
+- Matching follows the signal's **declared type**: a logic signal takes bit/numeric targets; a real/realtime signal is compared numerically (never as a bit string); an **event variable has no level** — `ev=1` is refused with a pointer to `changed(ev)`.
 - `!=` does **not** match `x`/`z`/undefined. Unknown is not evidence of difference. To find unknowns, use `signal=x`.
-- No OR operator. To search for `state=3 OR state=5`, run two searches and merge results.
+- **OR: repeat the flag.** `--condition A --condition B` holds wherever *either* clause holds (OR-of-ANDs) — one clause per channel to find when any handshakes. Duplicate clauses (identical, term-order permuted, or alias-equivalent) fold silently. Cost scales with the distinct signals referenced, not the clause count.
+- **There is no in-string OR.** `|`, `OR`, and parentheses inside a condition are ordinary text and are **rejected** — so a mis-typed boolean is an error, not a confident empty result. Any target the tool cannot use (`state=IDLE`, `state=nan`) is likewise rejected rather than silently unmatched.
+
+```bash
+# When does ANY channel handshake?
+python3 vcd_analyzer.py --json search <file> --condition "ch0_valid=1,ch0_ready=1" \
+                                             --condition "ch1_valid=1,ch1_ready=1"
+```
 
 ---
 
@@ -259,7 +269,7 @@ python3 vcd_analyzer.py info sim.vcd --json
 
 ### Output truncation
 
-Default `--limit` is 200 results. If `truncated: true` appears in JSON output, there are more results. Use `--limit 0` for unlimited, or increase the limit. The `total_is_exact` field tells you whether `total` is the true count or a lower bound (streaming commands stop counting after the first unshown result).
+Default `--limit` is 500 results. If `truncated: true` appears in JSON output, there are more results, and a `hint` field spells out what to do about it. Use `--limit 0` for unlimited, or increase the limit. The `total_is_exact` field tells you whether `total` is the true count or a lower bound (streaming commands stop counting after the first unshown result). In text mode a clipped result ends with a `>> TRUNCATED: ...` line.
 
 ### Time fields in JSON
 
@@ -295,6 +305,10 @@ Errors go to stderr and exit with code 1. The error message is a single human-re
 |---|---|---|
 | `condition signal pattern 'X' matches no signals` | Signal name not found | Use `list` to find correct path |
 | `condition signal pattern 'X' matches N signals` | Ambiguous pattern | Use full path from `list` output |
+| `invalid target 'X'` | Target the tool cannot use, often a mis-typed in-string OR | Repeat `--condition` to OR; write a decimal/hex/binary/4-state/real value |
+| `... has no level; use changed(...)` | Level comparison on an event variable | Ask `changed(SIG)` instead |
+| `cannot mix changed() and level-only --condition clauses` | Some clauses have an edge term, some do not | Give every clause a `changed()` term, or run two searches |
+| `--changed was removed` | Pre-1.5.0 flag | Write `--condition "changed(SIG)"` |
 | `end time must be >= begin time` | Reversed time range | Swap begin/end |
 | `cannot open VCD file` | File not found | Check path |
 | `VCD data section contains no value changes` | Empty or header-only VCD | File may be incomplete |
@@ -305,8 +319,8 @@ Errors go to stderr and exit with code 1. The error message is a single human-re
 
 - Does not read FSDB, SHM, WLF, or any non-VCD format (convert to VCD first using vendor tools)
 - Does not modify or write VCD files
-- Does not support OR in conditions (use multiple searches)
+- Does not support OR *inside* a condition string (repeat `--condition` instead)
 - Does not support arithmetic expressions in conditions (no `addr > 0xff`)
 - Does not support bit-select in show/condition (no `data[7:4]=0xF` — filter by the full signal)
 - Does not provide waveform visualization (text/JSON only)
-- Default limit is 200 — always check `truncated` field and increase `--limit` if needed
+- Default limit is 500 — always check `truncated` field and increase `--limit` if needed

@@ -13,7 +13,7 @@ FIX_HANDSHAKE = ROOT / "verify" / "fixtures" / "handshake_trace.vcd"
 FIX_BUS_RANGE = ROOT / "verify" / "fixtures" / "bus_range_trace.vcd"
 FIX_ESCAPED = ROOT / "verify" / "fixtures" / "escaped_trace.vcd"
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 LEGACY_SEARCH = False
 SUPPORTS_EDGES = False
 SUPPORTS_HANDSHAKE = False
@@ -166,10 +166,8 @@ class TestCLI(unittest.TestCase):
                 "--json",
                 "search",
                 FIX_SEARCH,
-                "--changed",
-                "tap",
                 "--condition",
-                "tb.valid=0",
+                "changed(tap),tb.valid=0",
                 "--begin",
                 "0ns",
                 "--end",

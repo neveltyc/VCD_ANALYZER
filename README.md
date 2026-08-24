@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.4.0-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.5.0-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
   <img alt="Tests" src="https://img.shields.io/badge/tests-94%20passed-22aa55?style=flat-square">
@@ -44,6 +44,13 @@ python vcd_analyzer.py dump sim.vcd --begin 100ns --end 200ns --filter state
 # When was valid=1 AND ready=1 at the same time?
 python vcd_analyzer.py search sim.vcd --condition "valid=1,ready=1" --show data
 
+# When did req transition while ready was low?
+python vcd_analyzer.py search sim.vcd --condition "changed(req),ready=0" --show state
+
+# When did ANY of several channels handshake? (repeat --condition to OR)
+python vcd_analyzer.py search sim.vcd --condition "ch0_valid=1,ch0_ready=1" \
+                                      --condition "ch1_valid=1,ch1_ready=1"
+
 # Give me a snapshot at exactly 17.55 us
 python vcd_analyzer.py snapshot sim.vcd --at 17.55us --filter state,init_done
 
@@ -60,7 +67,7 @@ Single file, no dependencies, Python 3.9+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.4.0/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.5.0/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
 python vcd_analyzer.py --version
@@ -104,9 +111,26 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
   value — a consecutive duplicate, or a `$dumpall`/`$dumpon` checkpoint
   re-emitting the current value — is a no-op and adds no change event (so
   `summary` static/active accounting stays exact).
-- **`search --changed` conditions are evaluated on the post-change state** —
-  the value after the transition at that timestamp. `"a=1"` reports rising
-  edges into 1; `"a!=0"` reports a 0→1 edge.
+- **`search` conditions are AND clauses; repeating `--condition` ORs them.**
+  One `--condition` is a comma-separated AND list of `SIG=VAL`, `SIG!=VAL`, or
+  `changed(SIG)` terms. Repeat the flag and the search holds wherever *any*
+  clause holds (OR-of-ANDs) — one clause per channel to find when any
+  handshakes. There is no in-string OR: `|` and `OR` inside a condition are
+  ordinary text and are rejected, so a mis-typed boolean is an error rather
+  than a confident empty result.
+- **`changed(SIG)` is an edge predicate**, true at exactly the ticks where SIG
+  transitions, and it switches `search` to event mode (instants instead of
+  intervals). Every clause must then carry one, or none may. Level terms in
+  the clause read the tick's **settled** state, so the answer never depends on
+  the order same-tick records happen to be written in; the transitioning
+  signal itself reads the value it took **at that edge**, so
+  `"changed(s),s=1"` means "rising edge of s". `changed(a),changed(b)` asks for
+  both to transition on one tick.
+- **Condition matching follows a signal's declared type.** A real/realtime
+  signal is compared numerically (`dac=3.14`, `dac=100`), never as a bit
+  string — its `%g` text would otherwise read as binary, making `dac=4` match
+  a real 100.0. An event variable has no level, so `ev=1` is refused with a
+  pointer to `changed(ev)`.
 - **Time windows.** With no `--end`, the effective end is the file's last
   timestamp, and a `--begin` past it is an error. With an explicit `--end`
   beyond the last timestamp, the last known state is extended into the window
@@ -121,7 +145,7 @@ ritual &mdash; drop it anywhere with Python 3.9+ and it works.
 
 ```
 vcd_analyzer.py       The tool (single file, stdlib only)
-verify/               pytest + unittest suite — 52 tests, 0 failures
+verify/               pytest + unittest suite — 162 tests, 0 failures
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
 CHANGELOG.md          Compact changelog with links to detailed release notes
@@ -156,6 +180,7 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 
 | Version | Highlight |
 |:--------|:----------|
+| `1.5.0` | `changed(SIG)` edge predicate replaces the `--changed` flag; repeatable `--condition` ORs clauses; condition matching follows the signal's declared type (fixes real-signal false positives/negatives); unusable condition targets are rejected instead of silently unmatched; `--limit` default 500 with a clearer truncation notice |
 | `1.4.0` | Internal refactor: separate the event stream from derived state into three distinct parser views (`iter_events` raw / `iter_transitions` / `state_at` snapshots); no change to any command's output, value-change hot path slightly faster |
 | `1.3.20` | Preserve intra-timestamp value changes; rebuild `info`'s time range on one forward scanner (parser-parity, ~1.5× faster, survives huge/`$dumpall` tails); `search --changed` counts each change; `info` `--limit` validation and empty-data output |
 | `1.3.19` | Fix free-format VCD correctness: multi-declaration/timestamp-per-line, quiet-window search, rejected-token cascade, `$dumpall` change count |

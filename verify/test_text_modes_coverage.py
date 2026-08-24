@@ -32,7 +32,7 @@ def test_text_info_list_dump_summary_snapshot_compare_search(capsys, tmp_path):
 
     va.cmd_list(v, ns(filter=None, limit=2, verbose=True))
     out = capsys.readouterr().out
-    assert 'Matched:' in out and 'truncated' in out
+    assert 'Matched:' in out and 'TRUNCATED' in out
 
     va.cmd_dump(v, ns(begin='100ns', end='200ns'))
     assert '(no changes in range)' in capsys.readouterr().out
@@ -56,7 +56,7 @@ def test_text_info_list_dump_summary_snapshot_compare_search(capsys, tmp_path):
     va.cmd_search(v, ns(condition='clk=1', begin='100ns', end='200ns'))
     assert 'No interval' in capsys.readouterr().out
 
-    va.cmd_search(v, ns(condition='rst=1', changed='clk', begin='20ns', end='20ns'))
+    va.cmd_search(v, ns(condition='changed(clk),rst=1', begin='20ns', end='20ns'))
     assert 'No event' in capsys.readouterr().out
 
 

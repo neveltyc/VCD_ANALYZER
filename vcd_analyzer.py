@@ -10,12 +10,12 @@ Commands:
   summary    <file> [--begin T] [--end T] [--filter K1,K2]   Per-signal stats: change count, unique values, static detection
   snapshot   <file> --at T [--filter K1,K2]        Known signal values at a given time point
   compare    <file> --at T1,T2 [--filter K1,K2]    Diff signal values between two time points
-  search     <file> --condition C [--show K1,K2] [--changed K] [--begin T] [--end T]
+  search     <file> --condition C [--condition C ...] [--show K1,K2] [--begin T] [--end T]
                                                         Conditional search and associated signal observation
 
 Global options:
   --json       Output compact structured JSON instead of text (time fields include *_ticks)
-  --limit N    Max rows/records to emit; default 200; 0 = unlimited.
+  --limit N    Max rows/records to emit; default 500; 0 = unlimited.
                Streaming commands stop after detecting the first unshown result.
   --verbose    Show extra fields; if --limit is omitted, disables truncation
 
@@ -27,18 +27,30 @@ Argument formats:
   --begin T       Start time with optional unit suffix: 0, 100ns, 17.5us, 1ms, 500ps, 200fs
   --end T         End time, same format as --begin. Omit for no upper bound
   --at T          Time point for snapshot. For compare: two points comma-separated: --at 17.5us,17.7us
-  --condition C   Comma-separated AND conditions: SIG=VAL, SIG==VAL, SIG!=VAL.
+  --condition C   One comma-separated AND clause. Each term is a level comparison
+                  (SIG=VAL, SIG==VAL, SIG!=VAL) or the edge predicate changed(SIG).
                   Condition signal patterns must match exactly one signal.
                   SIG!=VAL does not match x/z/undef; use SIG=x to search unknown.
-                  Values use numeric or 4-state matching: 5, 0x5, b0101, b1x0z.
+                  Values: decimal 5, hex 0x5, binary b0101, 4-state b1x0z, real 3.14.
+                  A logic signal takes bit/numeric targets, a real signal numeric ones;
+                  an event variable has no level -- ask changed(SIG) instead.
+                  REPEAT the flag to OR the clauses (OR-of-ANDs): the search holds
+                  wherever ANY clause holds, e.g. one clause per channel to find when
+                  any handshakes. There is no in-string OR ('|' / 'OR' / parentheses).
   --show K1,K2    Optional associated signals to display while condition holds;
                   segment mode splits whenever shown values change.
-  --changed K     Optional trigger signal; emit events only when this signal really changes.
-                  For ordinary signals, first observed values are not treated as changes.
-                  VCD event variables count each trigger; t=0 initialization is ignored.
-                  --condition is evaluated against the POST-change state (the value
-                  after the transition at that timestamp), so e.g. "a=1" reports
-                  rising edges into 1, and "a!=0" reports a 0->1 edge.
+
+  changed(SIG)    An edge predicate term, true at exactly the ticks where SIG
+                  transitions. It switches search to event mode (instants, not
+                  intervals); every clause must then carry one, or none may.
+                  First observed values and t=0 initialization are not transitions;
+                  VCD event variables count each trigger. With no --show, event
+                  mode shows the changed() signals.
+                  changed(a),changed(b) requires both to transition on one tick.
+                  Level terms in the clause read the tick's SETTLED state, so the
+                  answer does not depend on the order same-tick records happen to
+                  be written in; the transitioning signal itself reads the value it
+                  took AT that edge, so "changed(s),s=1" means "rising edge of s".
 
 Examples:
   vcd_analyzer info sim.vcd
@@ -49,7 +61,8 @@ Examples:
   vcd_analyzer compare sim.vcd --at 17.535us,17.56us --filter init_done,link_active,state
   vcd_analyzer search sim.vcd --condition "state=5"
   vcd_analyzer search sim.vcd --condition "arvalid=1,arready=1" --show araddr,arlen,arid
-  vcd_analyzer search sim.vcd --changed data_out --condition "valid=0" --show data_out,valid
+  vcd_analyzer search sim.vcd --condition "changed(data_out),valid=0" --show data_out,valid
+  vcd_analyzer search sim.vcd --condition "ch0_valid=1,ch0_ready=1" --condition "ch1_valid=1,ch1_ready=1"
   vcd_analyzer search sim.vcd --condition "valid=x"
   vcd_analyzer --json summary sim.vcd --filter tvalid,tready
 
@@ -68,10 +81,13 @@ Notes:
   timestamp (legal per IEEE 1364-2005, e.g. delta-cycle style writers) are all
   emitted, in order. A record that merely re-asserts a signal's current value
   -- a consecutive duplicate, or a $dumpall/$dumpon checkpoint re-emitting the
-  current value -- is a no-op and adds no change event.
+  current value -- is a no-op and adds no change event. search's event mode
+  reports one event per qualifying transition record on the same basis; a
+  clause requiring SEVERAL signals to transition together reports the tick once,
+  since coincidence is a property of the tick rather than of any one record.
 """
 
-__version__ = '1.4.0'
+__version__ = '1.5.0'
 
 import sys
 import os
@@ -1718,7 +1734,7 @@ class VCDParser:
 
 # -- Subcommands -------------------------------------------------------------
 
-_DEFAULT_LIMIT = 200
+_DEFAULT_LIMIT = 500
 
 
 def _json(obj):
@@ -1743,8 +1759,20 @@ def _clip(seq, limit):
     return seq[:limit], len(seq) > limit
 
 
+def _trunc_text(shown, total, noun, exact):
+    """Clipped-result notice.
+
+    Stands off by a blank line and leads with TRUNCATED, because the previous
+    one-line '... truncated: 2/3 rows shown.' was easy to skim past — and it
+    named neither of the flags that lift the cap.
+    """
+    return ('\n>> TRUNCATED: showing {} of {}{} {}. '
+            'Raise the cap with --limit N, or --limit 0 for all.').format(
+                shown, total, '' if exact else '+', noun)
+
+
 def _trunc_line(shown, total, noun):
-    return '... truncated: {}/{} {} shown.'.format(shown, total, noun)
+    return _trunc_text(shown, total, noun, True)
 
 
 def _trunc_line_lower_bound(shown, total, noun):
@@ -1754,7 +1782,21 @@ def _trunc_line_lower_bound(shown, total, noun):
     an output bound. `total` is a lower bound (normally shown + 1),
     not the exact global result count.
     """
-    return '... truncated: {}/{}+ {} shown.'.format(shown, total, noun)
+    return _trunc_text(shown, total, noun, False)
+
+
+def _trunc_hint(truncated, shown, total, exact, noun):
+    """JSON `hint` field for a clipped result, and nothing for a complete one.
+
+    `truncated: true` sitting among a dozen other keys is easy to skim past; a
+    sentence naming the flag that lifts the cap is not. Appears only when
+    something was clipped, so no existing key changed name, type, or meaning.
+    """
+    if not truncated:
+        return {}
+    return {'hint': 'showing {} of {}{} {}; raise the cap with --limit N, '
+                    'or --limit 0 for all'.format(
+                        shown, total, '' if exact else '+', noun)}
 
 
 def _total_json_fields(total, truncated):
@@ -1789,17 +1831,26 @@ def _time_pair(prefix, t, ts):
 def _parse_target_value(text):
     """Parse search/condition target once with bounded cost.
 
-    Returns (target_raw, target_int):
+    Returns (target_raw, target_int, target_real):
 
       - Numeric targets (decimal, 0x..., 0b..., b...) get target_int and are
         matched only by numeric equality.
       - 4-state binary literals with x/z keep a raw bit-string target. Explicit
         binary prefixes are stripped because VCD stores vector values as
         ``1x0`` internally, not ``b1x0``.
+      - A bare number carrying a fraction or exponent (3.14, 1e-9) is a
+        target_real, matched only against real/realtime signals.
 
     Invalid hex and negative decimal targets are rejected rather than silently
     producing no matches; VCD value_change text is unsigned, and x/z literals
     should be written in binary form (e.g. b1x0z).
+
+    A bare target that is none of the above is REJECTED rather than kept as an
+    opaque literal that could only ever compare unequal. The tool has no
+    in-string boolean syntax, so `--condition "a=1 OR b=1"` parses as a single
+    term whose target is the text `1 or b=1`; accepting it produced a
+    plausible-looking "no match" instead of an error. OR is spelled by
+    repeating --condition.
     """
     if text is None:
         raise _ValueParseError('target value must not be empty')
@@ -1822,56 +1873,56 @@ def _parse_target_value(text):
             raise _ValueParseError(
                 'hex target too wide; max hex digits is {}'.format(MAX_HEX_VALUE_DIGITS))
         try:
-            return raw, int(raw, 16)
+            return raw, int(raw, 16), None
         except ValueError:
             raise _ValueParseError(
                 'invalid hex target {!r}; x/z literals must use binary form like b1x0z'.format(text))
 
-    if raw.startswith('0b'):
-        body = raw[2:]
+    if raw.startswith('0b') or raw.startswith('b'):
+        body = raw[2:] if raw.startswith('0b') else raw[1:]
         if not body:
             raise _ValueParseError('binary target must contain at least one bit')
         if len(body) > MAX_SIGNAL_WIDTH:
             raise _ValueParseError(
                 'binary target too wide; max bits is {}'.format(MAX_SIGNAL_WIDTH))
         try:
-            return body, int(body, 2)
+            return body, int(body, 2), None
         except ValueError:
             if all(c in '01xz' for c in body):
-                return body, None
+                return body, None, None
             raise _ValueParseError(
                 'invalid binary target {!r}; expected only 0/1/x/z'.format(text))
 
-    if raw.startswith('b'):
-        body = raw[1:]
-        if not body:
-            raise _ValueParseError('binary target must contain at least one bit')
-        if len(body) > MAX_SIGNAL_WIDTH:
-            raise _ValueParseError(
-                'binary target too wide; max bits is {}'.format(MAX_SIGNAL_WIDTH))
-        try:
-            return body, int(body, 2)
-        except ValueError:
-            if all(c in '01xz' for c in body):
-                return body, None
-            raise _ValueParseError(
-                'invalid binary target {!r}; expected only 0/1/x/z'.format(text))
-
-    # Bare target: decimal numeric if possible, otherwise literal 4-state
-    # string (e.g. ``1x0``). Cap pure decimal digit count before int().
+    # Bare target, in order: decimal integer, 4-state literal, real number.
+    # Anything else is a parse error -- see the docstring on why an opaque
+    # literal fallback is worse than saying so.
     if raw.startswith('+'):
         raise _ValueParseError(
             'signed target values are not supported; write unsigned values')
-    if raw.isdigit() and len(raw) > MAX_DECIMAL_VALUE_DIGITS:
-        raise _ValueParseError(
-            'decimal target too long; max digits is {}'.format(MAX_DECIMAL_VALUE_DIGITS))
-    try:
-        return raw, int(raw)
-    except ValueError:
-        if len(raw) > MAX_SIGNAL_WIDTH:
+    if raw.isdigit():
+        if len(raw) > MAX_DECIMAL_VALUE_DIGITS:
             raise _ValueParseError(
-                'literal target too wide; max characters is {}'.format(MAX_SIGNAL_WIDTH))
-        return raw, None
+                'decimal target too long; max digits is {}'.format(MAX_DECIMAL_VALUE_DIGITS))
+        return raw, int(raw), None
+    if len(raw) > MAX_SIGNAL_WIDTH:
+        raise _ValueParseError(
+            'literal target too wide; max characters is {}'.format(MAX_SIGNAL_WIDTH))
+    if _is_4state_bits(raw):
+        return raw, None, None
+    # A number carrying a fraction or an exponent targets a real/realtime
+    # signal. nan/inf are rejected: a VCD real may legally be dumped as either,
+    # but neither is a useful equality target (nan never compares equal).
+    if len(raw) <= MAX_DECIMAL_VALUE_DIGITS + 32:
+        try:
+            fval = float(raw)
+        except ValueError:
+            fval = None
+        if fval is not None and math.isfinite(fval):
+            return raw, None, fval
+    raise _ValueParseError(
+        'invalid target {!r}; expected a decimal (5), hex (0xff), binary (b1010), '
+        '4-state literal (1x0z), or real number (3.14). Note there is no in-string '
+        'boolean syntax: repeat --condition to OR clauses'.format(text))
 
 
 def _is_4state_bits(text):
@@ -1894,20 +1945,64 @@ def _left_extend_bits(bits, width):
     return pad * (width - len(bits)) + bits
 
 
-def _value_matches(value, target_raw, target_int, width=None):
+def _real_target_number(target_int, target_real):
+    """Numeric value of a target for real/realtime comparison, or None.
+
+    A real target carries its float directly; a decimal/hex/binary target is
+    an exact integer that is converted on demand, so `dac=100` asks the same
+    question as `dac=100.0`. A bus-width integer can exceed the float range,
+    which is not an error -- it simply cannot equal any finite real.
+    """
+    if target_real is not None:
+        return target_real
+    if target_int is not None:
+        try:
+            return float(target_int)
+        except OverflowError:
+            return None
+    return None
+
+
+def _value_matches(value, target_raw, target_int, width=None, kind=None,
+                   target_real=None):
     """Match a recorded value against a parsed search target.
 
-    Numeric targets (decimal/hex/binary without x/z) match only by numeric
-    equality, avoiding the decimal/binary collision where target 10 would
-    otherwise raw-match a 2-bit value "10".
+    The recorded value is classified by the signal's DECLARED kind, never by
+    sniffing its characters. A real signal carries the simulator's %g text as
+    its value, so a real 100.0 renders as "100"; read as a bit string that is
+    binary 100 == 4, which made `dac=4` match spuriously and `dac=100` miss.
 
-    Non-numeric 4-state targets (for example b1x0 -> raw "1x0") match as
-    bit patterns. If the signal width is known, both the dumped value and the
-    target are left-extended to that width using VCD rules before comparison.
-    This preserves exact x/z semantics while avoiding the need to write every
-    leading zero for wide buses. Non-bit-string literals fall back to exact
-    string equality.
+    kind 'real'/'realtime' therefore compares numerically as floats and never
+    as bits. kind 'event' has no level at all and never matches (level terms
+    on event variables are rejected at resolve time; this is the belt).
+
+    For logic signals (kind 'vector'/'scalar', or None for callers that do not
+    classify):
+
+    - Numeric targets (decimal/hex/binary without x/z) match only by numeric
+      equality, avoiding the decimal/binary collision where target 10 would
+      otherwise raw-match a 2-bit value "10".
+    - Non-numeric 4-state targets (for example b1x0 -> raw "1x0") match as bit
+      patterns. If the signal width is known, both the dumped value and the
+      target are left-extended to that width using VCD rules before
+      comparison. This preserves exact x/z semantics while avoiding the need
+      to write every leading zero for wide buses. Non-bit-string literals fall
+      back to exact string equality.
     """
+    if kind == 'event':
+        return False
+    if kind == 'real':
+        target_num = _real_target_number(target_int, target_real)
+        if target_num is None:
+            return False
+        try:
+            return float(value) == target_num
+        except (TypeError, ValueError):
+            return False
+    if target_real is not None:
+        # A real-number target against a logic signal (rejected at resolve
+        # time; this is the belt for direct callers).
+        return False
     if target_int is not None:
         iv = val_to_int(value)
         return iv is not None and iv == target_int
@@ -1921,17 +2016,28 @@ def _value_matches(value, target_raw, target_int, width=None):
 _COND_RE = re.compile(r'^\s*(.+?)\s*(==|=|!=)\s*(.+?)\s*$')
 
 
-def _has_unknown(value):
-    """True when a VCD value is unknown/ambiguous for negative predicates."""
-    return value is None or 'x' in value or 'z' in value
+def _has_unknown(value, kind=None):
+    """True when a VCD value is unknown/ambiguous for negative predicates.
+
+    A real signal's value is decimal text, so a literal 'x'/'z' in it (as in
+    the %g rendering of a hex-ish string, or 'nan') is not a 4-state unknown;
+    only logic values can be unknown in that sense.
+    """
+    if value is None:
+        return True
+    if kind == 'real':
+        return False
+    return 'x' in value or 'z' in value
 
 
-def _condition_match(value, op, target_raw, target_int, width=None):
+def _condition_match(value, op, target_raw, target_int, width=None, kind=None,
+                     target_real=None):
     """Evaluate one resolved condition against a raw VCD value.
 
-    Equality reuses the existing two-mode value matcher, so numeric targets
-    are compared numerically and mixed x/z literals are compared as 4-state
-    bit patterns, width-aware when the signal width is available.
+    Equality reuses the kind-aware value matcher, so real signals compare
+    numerically, numeric targets on logic signals compare numerically, and
+    mixed x/z literals compare as 4-state bit patterns, width-aware when the
+    signal width is available.
 
     Inequality is deliberately stricter than `not _value_matches(...)`:
     x/z/undef do NOT satisfy `!=`. In RTL debug, unknown is not evidence that
@@ -1941,16 +2047,58 @@ def _condition_match(value, op, target_raw, target_int, width=None):
     if value is None:
         return False
     if op in ('=', '=='):
-        return _value_matches(value, target_raw, target_int, width)
+        return _value_matches(value, target_raw, target_int, width, kind, target_real)
     if op == '!=':
-        if _has_unknown(value):
+        if _has_unknown(value, kind):
             return False
-        return not _value_matches(value, target_raw, target_int, width)
+        return not _value_matches(value, target_raw, target_int, width, kind, target_real)
     raise AssertionError('unsupported condition operator {}'.format(op))
 
 
+_CHANGED_PREFIX = 'changed('
+
+
+def _parse_changed_term(item):
+    """Recognize the `changed(SIG)` edge-predicate form.
+
+    Any term starting with `changed(` (case-insensitive) is claimed by this
+    syntax. A bare term with no operator was never valid before, so no working
+    condition changes meaning; the one shadowed spelling is a level term on an
+    escaped identifier that itself begins with `changed(`, which stays
+    reachable through a scope-qualified pattern (`tb.changed(a)=1` does not
+    start with the prefix).
+
+    Returns None when the term does not start with the prefix; malformed
+    `changed(...` shapes get targeted errors rather than the generic one.
+    """
+    if item[:len(_CHANGED_PREFIX)].lower() != _CHANGED_PREFIX:
+        return None
+    body = item[len(_CHANGED_PREFIX):]
+    if body.endswith(')'):
+        inner = body[:-1].strip()
+        if not inner:
+            raise _ConditionParseError(
+                'changed() requires a signal, e.g. changed(req)')
+        return {'kind': 'changed', 'pattern': inner, 'original': item}
+    if ')' in body:
+        # e.g. `changed(req)=1` -- trailing text after the closing paren.
+        raise _ConditionParseError(
+            'invalid term {!r}: changed(SIG) is a predicate and takes no comparison'.format(item))
+    # No closing paren: a plain missing ')', or `changed(a,b)` cut apart by the
+    # AND comma before this function ever saw it.
+    raise _ConditionParseError(
+        "invalid term {!r}: unclosed changed( -- missing ')'? note changed() takes "
+        'exactly one signal: a comma inside the parens is read as an AND separator, '
+        'so "both changed" is changed(a),changed(b)'.format(item))
+
+
 def _parse_conditions(text):
-    """Parse comma-separated AND conditions into unresolved condition dicts."""
+    """Parse one comma-separated AND clause into unresolved condition dicts.
+
+    A term is either a level comparison (`SIG=VAL`, `SIG==VAL`, `SIG!=VAL`) or
+    the edge predicate `changed(SIG)`, which is true at exactly the ticks where
+    SIG transitions. Each dict carries a 'kind' of 'level' or 'changed'.
+    """
     if text is None or not str(text).strip():
         raise _ConditionParseError('search requires --condition')
     conditions = []
@@ -1958,22 +2106,29 @@ def _parse_conditions(text):
         item = item.strip()
         if not item:
             continue
+        changed = _parse_changed_term(item)
+        if changed is not None:
+            conditions.append(changed)
+            continue
         m = _COND_RE.match(item)
         if not m:
             raise _ConditionParseError(
-                'invalid condition {!r}; expected SIG=VAL, SIG==VAL, or SIG!=VAL'.format(item))
+                'invalid condition {!r}; expected SIG=VAL, SIG==VAL, SIG!=VAL, '
+                'or changed(SIG)'.format(item))
         sig_pat = m.group(1).strip()
         op = m.group(2)
         val_text = m.group(3).strip()
         if not sig_pat or not val_text:
             raise _ConditionParseError(
                 'invalid empty signal/value in condition {!r}'.format(item))
-        target_raw, target_int = _parse_target_value(val_text)
+        target_raw, target_int, target_real = _parse_target_value(val_text)
         conditions.append({
+            'kind': 'level',
             'pattern': sig_pat,
             'op': op,
             'target_raw': target_raw,
             'target_int': target_int,
+            'target_real': target_real,
             'original': item,
             'value_text': val_text,
         })
@@ -2020,22 +2175,99 @@ def _resolve_one_signal(vcd, pattern, role):
     return next(iter(sids))
 
 
+def _term_key(c):
+    """De-duplication key for one resolved term.
+
+    Keyed on the resolved sid (so alias paths for one signal fold), the
+    operator slot ('changed' for the edge predicate, which no comparison
+    operator can spell), and the target value AS WRITTEN -- `5` and `0x5` are
+    the same number but different spellings and deliberately do not fold, so
+    there is no cross-base normalization to get wrong. Shared by the
+    within-clause term de-dup and the cross-clause clause_key below, so the
+    two can never drift apart.
+    """
+    if c['kind'] == 'changed':
+        return (c['sid'], 'changed', '')
+    return (c['sid'], c['op'], '{}:{}'.format(
+        c['target_raw'], c['target_int'] is not None or c['target_real'] is not None))
+
+
+def _check_term_kind(c):
+    """Reject a level term the signal's declared kind cannot answer.
+
+    Silence is the wrong answer here: an event variable has no level, and a
+    real signal cannot equal a bit pattern, so leaving these to the matcher
+    would produce a plausible-looking empty result instead of saying that the
+    question does not apply to this signal.
+    """
+    kind = c['kind_of_signal']
+    if kind == 'event':
+        raise _ConditionParseError(
+            "condition {!r} targets event variable {}, which has no level; "
+            'use changed({}) to fire on each trigger'.format(
+                c['original'], c['path'], c['path']))
+    if kind == 'real':
+        if c['target_int'] is None and c['target_real'] is None:
+            raise _ConditionParseError(
+                'condition {!r} compares real signal {} against a bit pattern; '
+                'write a decimal or real number, e.g. {}=3.14'.format(
+                    c['original'], c['path'], c['path']))
+    elif c['target_real'] is not None:
+        raise _ConditionParseError(
+            'condition {!r} compares logic signal {} (width {}) against the real '
+            'number {}; use a decimal, hex, binary, or 4-state target'.format(
+                c['original'], c['path'], c['width'], c['value_text']))
+
+
 def _resolve_conditions(vcd, text):
-    """Parse and resolve condition signal patterns to signal ids."""
+    """Parse and resolve one AND clause's signal patterns to signal ids."""
     resolved = []
     seen = set()
     for c in _parse_conditions(text):
-        sid = _resolve_one_signal(vcd, c['pattern'], 'condition signal')
-        key = (sid, c['op'], c['target_raw'], c['target_int'])
-        if key in seen:
-            continue
-        seen.add(key)
+        role = 'changed() signal' if c['kind'] == 'changed' else 'condition signal'
+        sid = _resolve_one_signal(vcd, c['pattern'], role)
         c = dict(c)
         c['sid'] = sid
         c['path'] = vcd.signals[sid]['path']
         c['width'] = vcd.signals[sid]['width']
+        # 1.4.0's precomputed kind table, which exists exactly so consumers
+        # need not re-derive a signal's class from its declared type.
+        c['kind_of_signal'] = vcd._sid_kind[sid]
+        if c['kind'] == 'level':
+            _check_term_kind(c)
+        key = _term_key(c)
+        if key in seen:
+            continue
+        seen.add(key)
         resolved.append(c)
     return resolved
+
+
+def _resolve_clauses(vcd, texts):
+    """Resolve every --condition into an OR clause list (OR-of-ANDs).
+
+    Each --condition is one comma-separated AND clause; repeating the flag ORs
+    the clauses. Duplicate clauses -- identical, term-order permuted, or
+    alias-equivalent -- fold silently to the first occurrence, so a scripted
+    caller that repeats a clause does not double the echoed condition. A single
+    clause keeps exactly today's behavior, echo included.
+    """
+    if texts is None:
+        raise _ConditionParseError('search requires --condition')
+    if isinstance(texts, str):
+        texts = [texts]
+    clauses = []
+    seen = set()
+    for text in texts:
+        clause = _resolve_conditions(vcd, text)
+        key = tuple(sorted(_term_key(c) for c in clause))
+        if key in seen:
+            continue
+        seen.add(key)
+        clauses.append(clause)
+    if not clauses:
+        raise _ConditionParseError('search requires --condition')
+    return clauses
 
 
 def _resolve_show_sids(vcd, show_patterns):
@@ -2085,13 +2317,46 @@ def _resolve_show_sids(vcd, show_patterns):
     return sorted(selected, key=lambda sid: vcd.signals[sid]['path'])
 
 
-def _conditions_hold(state, conditions):
+def _conditions_hold(state, conditions, changed_sids=frozenset(),
+                     ov_sid=None, ov_val=None):
+    """Do all of one clause's AND terms hold?
+
+    `state` maps sid to raw value; `changed_sids` is the set of signals that
+    genuinely transitioned at the tick under evaluation (empty outside event
+    mode, where no clause carries a changed() term).
+
+    `ov_sid`/`ov_val` override one signal's value for this evaluation. Event
+    mode uses it for the edge's own signal: everything else is read at the
+    tick's settled state (so the answer does not depend on the order records
+    happen to be written in), while the transitioning signal is read at the
+    value it took AT that edge — which is what makes `changed(s),s=1` mean
+    "rising edge of s" even when s toggles several times inside one tick.
+    """
     for c in conditions:
+        if c['kind'] == 'changed':
+            if c['sid'] not in changed_sids:
+                return False
+            continue
+        sid = c['sid']
+        value = ov_val if sid == ov_sid else state.get(sid)
         if not _condition_match(
-                state.get(c['sid']), c['op'], c['target_raw'],
-                c['target_int'], c.get('width')):
+                value, c['op'], c['target_raw'],
+                c['target_int'], c.get('width'), c.get('kind_of_signal'),
+                c.get('target_real')):
             return False
     return True
+
+
+def _any_clause_holds(state, clauses, changed_sids=frozenset()):
+    """OR across clauses: the search holds when ANY clause's terms all hold.
+
+    With a single clause this is exactly _conditions_hold, so single
+    --condition behavior is unchanged.
+    """
+    for clause in clauses:
+        if _conditions_hold(state, clause, changed_sids):
+            return True
+    return False
 
 
 def _condition_label(conditions):
@@ -2099,21 +2364,39 @@ def _condition_label(conditions):
 
 
 def _condition_result_text(conditions):
-    return ','.join('{}{}{}'.format(c['path'], c['op'], c['value_text']) for c in conditions)
+    return ','.join(
+        'changed({})'.format(c['path']) if c['kind'] == 'changed'
+        else '{}{}{}'.format(c['path'], c['op'], c['value_text'])
+        for c in conditions)
 
 
-def _show_values(vcd, state, show_sids, verbose=False):
+def _join_clauses(clauses, render):
+    """Echo the clause list: a lone clause as-is, several as `(..) OR (..)`.
+
+    The single-clause form is deliberately unparenthesized so that every
+    existing one-condition invocation echoes byte-for-byte as before.
+    """
+    if len(clauses) == 1:
+        return render(clauses[0])
+    return ' OR '.join('({})'.format(render(c)) for c in clauses)
+
+
+def _show_values(vcd, state, show_sids, verbose=False, ov_sid=None, ov_val=None):
     """Return (values, meta) for show signals in current state.
 
     The return shape is intentionally stable regardless of verbose. meta is
     None unless verbose=True. This avoids type-dependent unpacking in search.
+
+    `ov_sid`/`ov_val` override one signal, matching _conditions_hold: an event
+    row shows the transitioning signal at the value it took at that edge, and
+    every other shown signal at the tick's settled value.
     """
     values = {}
     meta = {} if verbose else None
     for sid in show_sids:
         info = vcd.signals[sid]
         path = info['path']
-        raw = state.get(sid)
+        raw = ov_val if sid == ov_sid else state.get(sid)
         values[path] = fmt_val(raw, info) if raw is not None else '(undef)'
         if verbose:
             meta[path] = {'raw': raw, 'width': info['width'], 'type': info.get('type', 'wire')}
@@ -2145,6 +2428,27 @@ def _event_groups(vcd, t0, t1, sids):
             yield cur_t, group
             cur_t, group = t, []
         group.append((sid, val))
+    if cur_t is not None:
+        yield cur_t, group
+
+
+def _transition_groups(vcd, t0, t1, sids):
+    """Yield (time, [(sid, prev, val, kind), ...]) groups in time order.
+
+    _event_groups over the TRANSITIONS view: same per-timestamp grouping, but
+    each record keeps the previously observed value and the signal kind, which
+    is what lets event mode compute a tick's transition set (and so answer
+    "did a and b change together?") without re-deriving either.
+    """
+    cur_t = None
+    group = []
+    for t, sid, prev, val, kind in vcd.iter_transitions(t0, t1, sids):
+        if cur_t is None:
+            cur_t = t
+        if t != cur_t:
+            yield cur_t, group
+            cur_t, group = t, []
+        group.append((sid, prev, val, kind))
     if cur_t is not None:
         yield cur_t, group
 
@@ -2356,7 +2660,9 @@ def cmd_list(vcd, args):
     entries.sort(key=lambda e: e['path'])
     shown, trunc = _clip(entries, limit)
     if args.json:
-        _json({'total': len(entries), 'shown': len(shown), 'truncated': trunc, 'signals': shown})
+        _json({'total': len(entries), 'shown': len(shown), 'truncated': trunc,
+               **_trunc_hint(trunc, len(shown), len(entries), True, 'signals'),
+               'signals': shown})
     else:
         # Numerator and denominator are both alias-path counts: 'entries' holds
         # one row per alias of each matched signal, so the total must likewise
@@ -2406,7 +2712,9 @@ def cmd_dump(vcd, args):
                 e['width'] = info['width']
                 e['type'] = info.get('type', 'wire')
             events.append(e)
-        obj = {'shown': len(events), 'truncated': truncated, 'events': events}
+        obj = {'shown': len(events), 'truncated': truncated,
+               **_trunc_hint(truncated, len(events), total, False, 'events'),
+               'events': events}
         obj.update(_total_json_fields(total, truncated))
         _json(obj)
         return
@@ -2484,6 +2792,7 @@ def cmd_summary(vcd, args):
                           'begin_ticks': t0, 'begin_h': begin_h,
                           'end_ticks': t1, 'end_h': end_h}, **counts,
                'shown': len(shown), 'truncated': trunc,
+               **_trunc_hint(trunc, len(shown), len(ordered), True, 'rows'),
                'rows': [_public_row(r, getattr(args, 'verbose', False)) for r in shown]})
         return
     print('Window: {}..{}'.format(begin_h, end_h if end_h is not None else '(end)'))
@@ -2546,6 +2855,7 @@ def cmd_snapshot(vcd, args):
         _json({'at': fmt_time(t_at, ts), 'at_ticks': t_at, 'at_h': fmt_time(t_at, ts),
                'selected': len(selected), 'known': len(state),
                'undefined': len(undef), 'shown': len(shown), 'truncated': trunc,
+               **_trunc_hint(trunc, len(shown), len(rows), True, 'signals'),
                'signals': shown})
         return
     if not state:
@@ -2594,6 +2904,7 @@ def cmd_compare(vcd, args):
         _json({'t1': fmt_time(ta, ts), 't1_ticks': ta, 't1_h': fmt_time(ta, ts),
                't2': fmt_time(tb, ts), 't2_ticks': tb, 't2_h': fmt_time(tb, ts),
                'total': len(diffs), 'shown': len(shown), 'truncated': trunc,
+               **_trunc_hint(trunc, len(shown), len(diffs), True, 'diffs'),
                'diffs': shown})
     else:
         print('Compare: {} vs {}'.format(fmt_time(ta, ts), fmt_time(tb, ts)))
@@ -2619,70 +2930,135 @@ def cmd_search(vcd, args):
                     fmt_time(t0, ts), fmt_time(t1, ts)))
         raise _TimeParseError('end time must be >= begin time')
 
-    conditions = _resolve_conditions(vcd, args.condition)
-    show_sids = _resolve_show_sids(vcd, args.show)
-    changed_sid = _resolve_one_signal(vcd, args.changed, 'changed signal') if args.changed else None
-    if changed_sid is not None and not show_sids:
-        show_sids = [changed_sid]
+    clauses = _resolve_clauses(vcd, args.condition)
 
-    selected = set(c['sid'] for c in conditions)
+    # Mode split: a clause carrying a changed() term describes ticks (event
+    # mode); one without describes spans (interval/segment mode). The two row
+    # shapes cannot merge, so mixing is a usage error rather than a silent
+    # pick of one.
+    with_changed = [cl for cl in clauses
+                    if any(c['kind'] == 'changed' for c in cl)]
+    if with_changed and len(with_changed) < len(clauses):
+        raise _ConditionParseError(
+            'cannot mix changed() and level-only --condition clauses: a changed() '
+            'clause fires at ticks (event mode) while a level-only clause spans '
+            'time (interval mode); give every clause a changed() term, or run two '
+            'searches')
+    event_mode = bool(with_changed)
+    changed_sids = sorted(
+        {c['sid'] for cl in clauses for c in cl if c['kind'] == 'changed'},
+        key=lambda sid: vcd.signals[sid]['path'])
+
+    show_sids = _resolve_show_sids(vcd, args.show)
+    if event_mode and not show_sids:
+        # Event mode with no --show: watch the changed() signals themselves.
+        show_sids = list(changed_sids)
+
+    # Cost scales with the distinct signals referenced, not the clause count.
+    selected = set(c['sid'] for cl in clauses for c in cl)
     selected.update(show_sids)
-    if changed_sid is not None:
-        selected.add(changed_sid)
 
     limit = _limit(args, 'search')
     verbose = getattr(args, 'verbose', False)
-    cond_label = _condition_label(conditions)
-    cond_text = _condition_result_text(conditions)
+    cond_label = _join_clauses(clauses, _condition_label)
+    cond_text = _join_clauses(clauses, _condition_result_text)
 
-    if changed_sid is not None:
-        # Single-pass over the transition stream: fold state < t0 (baseline),
-        # then evaluate each in-window change. prev (old value) and kind come
-        # from the stream, so there is no per-timestamp regrouping and no
-        # re-derivation of type == 'event' here — the change stream already
-        # applies event-trigger and no-op semantics.
+    if event_mode:
+        # Event mode is a per-TICK query with per-RECORD emission.
+        #
+        # Per tick: collect the tick's genuine transitions, apply every record,
+        # then judge the clauses. Every signal EXCEPT the one transitioning is
+        # read at the tick's SETTLED state, which is what makes the answer
+        # independent of the order records happen to be written in — IEEE 1364
+        # fixes neither the order nor the count of value_changes within one
+        # simulation_time, so a level term decided halfway through a tick was
+        # reading an artifact of the writer. The transitioning signal is read
+        # at the value it took AT that edge, since the order of one signal's
+        # own records is the delta-cycle sequence and does carry meaning; that
+        # is what keeps `changed(s),s=1` meaning "rising edge of s".
+        #
+        # Emission is per-record, so an event variable still counts each
+        # trigger and an intra-tick 0->1->0 run still exposes each transition
+        # (the 1.3.20 contract, and what `dump` shows). A clause requiring
+        # SEVERAL signals to transition together is the exception: coincidence
+        # is a property of the tick, not of any one record, so such a clause
+        # reports the tick once.
         state = {}
         events = []
         total = 0
         truncated = False
+        changed_set = set(changed_sids)
+        multi_clauses = []      # clauses requiring several signals to coincide
+        by_edge_sid = {}        # sid -> single-edge clauses that sid can fire
+        for cl in clauses:
+            edge_sids = [c['sid'] for c in cl if c['kind'] == 'changed']
+            if len(edge_sids) > 1:
+                multi_clauses.append(cl)
+            else:
+                by_edge_sid.setdefault(edge_sids[0], []).append(cl)
 
-        for t, sid, prev, val, kind in vcd.iter_transitions(0, t1, selected):
-            if t < t0:
-                # Baseline: settled state up to (but not including) t0.
-                state[sid] = val
+        stop = False
+        for gt, group in _transition_groups(vcd, 0, t1, selected):
+            if gt < t0:
+                # Baseline: settled state strictly before t0. Event mode reports
+                # changes within [t0, t1], so a change landing exactly at t0 is
+                # in-window — this `< t0` deliberately differs from interval
+                # mode's `<= t0` (level semantics) below; do not unify.
+                for gsid, _gprev, gval, _gkind in group:
+                    state[gsid] = gval
                 continue
 
             # A change is an event-var trigger (every record counts) or a real
             # value transition; a first observation (prev is None) is not a
-            # change, matching the pre-1.3.20 contract. Intra-timestamp runs like
-            # 0->1->0 expose each transition (the stream yields each in order),
-            # and state is updated per event so the condition sees the
-            # post-change value at each step; every qualifying step emits.
-            is_change = (kind == 'event') or (prev is not None and prev != val)
-            state[sid] = val
-            if not is_change:
+            # change, matching the pre-1.3.20 contract.
+            tick_changed = set()
+            edges = []
+            for gsid, gprev, gval, gkind in group:
+                if gkind == 'event' or (gprev is not None and gprev != gval):
+                    tick_changed.add(gsid)
+                    if gsid in changed_set:
+                        edges.append((gsid, gval))
+                state[gsid] = gval
+            if not edges:
                 continue
-            if sid == changed_sid and _conditions_hold(state, conditions):
-                values, meta = _show_values(vcd, state, show_sids, verbose)
-                event = {'time_ticks': t, 'time_h': fmt_time(t, ts),
-                         'values': values}
-                if verbose:
-                    event['meta'] = meta
+
+            fired = []      # (ov_sid, ov_val) per emitted row
+            if any(_conditions_hold(state, cl, tick_changed) for cl in multi_clauses):
+                # Coincidence is a tick property: report the tick once, with
+                # every shown signal at its settled value.
+                fired.append((None, None))
+            else:
+                for esid, edge_val in edges:
+                    for cl in by_edge_sid.get(esid, ()):
+                        if _conditions_hold(state, cl, tick_changed, esid, edge_val):
+                            fired.append((esid, edge_val))
+                            break
+            for ov_sid, ov_val in fired:
                 total += 1
                 if limit != 0 and len(events) >= limit:
                     truncated = True
+                    stop = True
                     break
+                values, meta = _show_values(vcd, state, show_sids, verbose,
+                                            ov_sid, ov_val)
+                event = {'time_ticks': gt, 'time_h': fmt_time(gt, ts),
+                         'values': values}
+                if verbose:
+                    event['meta'] = meta
                 events.append(event)
+            if stop:
+                break
 
         if args.json:
             obj = {'mode': 'event', 'condition': cond_label,
                    'condition_resolved': cond_text,
-                   'changed': vcd.signals[changed_sid]['path'],
+                   'changed': [vcd.signals[sid]['path'] for sid in changed_sids],
                    'show': [vcd.signals[sid]['path'] for sid in show_sids],
                    'begin_ticks': t0, 'begin_h': fmt_time(t0, ts),
                    'end_ticks': t1, 'end_h': fmt_time(t1, ts),
                    'shown': len(events), 'truncated': truncated,
                    'events': events}
+            obj.update(_trunc_hint(truncated, len(events), total, False, 'events'))
             obj.update(_total_json_fields(total, truncated))
             _json(obj)
             return
@@ -2693,8 +3069,8 @@ def cmd_search(vcd, args):
             if truncated:
                 print(_trunc_line_lower_bound(len(events), total, 'events'))
         else:
-            print('No event in {}..{} where {} changed and {}.'.format(
-                fmt_time(t0, ts), fmt_time(t1, ts), vcd.signals[changed_sid]['path'], cond_text))
+            print('No event in {}..{} where {}.'.format(
+                fmt_time(t0, ts), fmt_time(t1, ts), cond_text))
         return
 
     # Interval/segment mode. A segment is an interval further split whenever
@@ -2737,7 +3113,7 @@ def cmd_search(vcd, args):
             continue
 
         if not init_checks_done:
-            active = _conditions_hold(state, conditions)
+            active = _any_clause_holds(state, clauses)
             seg_start = t0 if active else None
             if active and has_show:
                 seg_values, seg_meta = _show_values(vcd, state, show_sids, verbose)
@@ -2747,7 +3123,7 @@ def cmd_search(vcd, args):
         # settled state.
         for gsid, gval in ggroup:
             state[gsid] = gval
-        cond_ok = _conditions_hold(state, conditions)
+        cond_ok = _any_clause_holds(state, clauses)
         if not has_show:
             if cond_ok and not active:
                 active = True
@@ -2794,7 +3170,7 @@ def cmd_search(vcd, args):
     # now from the baseline state; with no groups the final-interval emit below
     # reports the whole window.
     if not init_checks_done:
-        active = _conditions_hold(state, conditions)
+        active = _any_clause_holds(state, clauses)
         seg_start = t0 if active else None
         if active and has_show:
             seg_values, seg_meta = _show_values(vcd, state, show_sids, verbose)
@@ -2818,6 +3194,7 @@ def cmd_search(vcd, args):
                'begin_ticks': t0, 'begin_h': fmt_time(t0, ts),
                'end_ticks': t1, 'end_h': fmt_time(t1, ts),
                'shown': len(results), 'truncated': truncated,
+               **_trunc_hint(truncated, len(results), total, False, key),
                key: results}
         obj.update(_total_json_fields(total, truncated))
         _json(obj)
@@ -2860,7 +3237,7 @@ def _add_common(sp):
     sp.add_argument('--json', action='store_true', default=argparse.SUPPRESS,
                     help='output compact structured JSON instead of text')
     sp.add_argument('--limit', type=int, default=argparse.SUPPRESS,
-                    help='max rows/records to emit; default 200; 0 = unlimited; streaming commands stop after the first unshown result')
+                    help='max rows/records to emit; default 500; 0 = unlimited; streaming commands stop after the first unshown result')
     sp.add_argument('--verbose', action='store_true', default=argparse.SUPPRESS,
                     help='show extra fields; if --limit is omitted, disables truncation')
 
@@ -2873,7 +3250,7 @@ def main():
     p.add_argument('--json', action='store_true',
                    help='output compact structured JSON instead of text')
     p.add_argument('--limit', type=int, default=None,
-                   help='max rows/records to emit; default 200; 0 = unlimited; streaming commands stop after the first unshown result')
+                   help='max rows/records to emit; default 500; 0 = unlimited; streaming commands stop after the first unshown result')
     p.add_argument('--verbose', action='store_true',
                    help='show extra fields; if --limit is omitted, disables truncation')
     p.add_argument('--version', action='version', version='%(prog)s ' + __version__)
@@ -2903,18 +3280,27 @@ def main():
 
     sp = sub.add_parser('search', help='conditional search and associated signal observation')
     sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_common(sp)
-    sp.add_argument('--condition', metavar='COND', required=True,
-                    help='comma-separated AND conditions, e.g. "valid=1,ready=1"; != does not match x/z/undef')
+    sp.add_argument('--condition', metavar='COND', required=True, action='append',
+                    help='comma-separated AND terms: SIG=VAL, SIG!=VAL, or changed(SIG); '
+                         '!= does not match x/z/undef. Repeat the flag to OR the clauses '
+                         '(there is no in-string OR). A changed(SIG) term switches to event '
+                         'mode; then every clause must carry one')
     sp.add_argument('--show', metavar='PAT1,PAT2,...', type=_normalize_filter_patterns,
                     help='signals to display while the condition holds; output segments split when shown values change')
-    sp.add_argument('--changed', metavar='PATTERN',
-                    help='emit events only when this signal really changes; VCD event vars count each trigger; must match exactly one signal; '
-                         '--condition is evaluated on the post-change state (e.g. "a=1" reports edges into 1)')
+    sp.add_argument('--changed', metavar='PATTERN', default=None,
+                    help=argparse.SUPPRESS)
 
     args = p.parse_args()
     if not args.cmd:
         p.print_help()
         sys.exit(1)
+    if getattr(args, 'changed', None) is not None:
+        # Removed in 1.5.0: the flag's event mode was a variant of --condition
+        # wearing a flag's clothes, and being a flag it applied to the whole
+        # query — an edge could not be scoped to one OR clause, and two signals
+        # could not be required to transition together.
+        sys.exit('Error: --changed was removed; write the edge as a condition term instead: '
+                 '--condition "changed({})"'.format(args.changed))
 
     try:
         vcd = VCDParser(args.file)

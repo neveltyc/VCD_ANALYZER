@@ -21,7 +21,7 @@ def minimal_vcd(decls, data, scope='tb', timescale='1ns'):
 
 def ns(**kwargs):
     defaults = dict(json=False, verbose=False, limit=None, filter=None, begin=None, end=None, at=None,
-                    condition=None, show=None, changed=None)
+                    condition=None, show=None)
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 

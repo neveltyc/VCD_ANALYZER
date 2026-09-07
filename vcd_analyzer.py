@@ -87,7 +87,7 @@ Notes:
   since coincidence is a property of the tick rather than of any one record.
 """
 
-__version__ = '1.5.0'
+__version__ = '1.5.1'
 
 import sys
 import os
@@ -165,6 +165,17 @@ _REAL_RE = re.compile(
     r'^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$'
 )
 _REAL_MAX_LEN = 64  # Defensive cap: %.16g + sign + exponent fits well under this
+
+# C99 printf("%g") also renders non-finite doubles as 'inf' / '-inf' / 'nan'
+# (float() additionally accepts 'infinity'), and IEEE 1364's real_number is
+# %g output — so these are legal value_change texts the numeric pattern above
+# cannot match. This companion pattern keeps such records in the stream
+# instead of silently dropping a legal dump record (the pre-fix behavior lost
+# the event from dump, info's time range, and summary counts with no
+# diagnostic). Equality targets still reject them in _parse_target_value:
+# nan never compares equal and inf has no finite target, so no condition can
+# match one — a stated limitation, not data loss.
+_REAL_NONFINITE_RE = re.compile(r'^[+-]?(?:inf(?:inity)?|nan)$', re.IGNORECASE)
 
 # Fast 4-state validation tables. str.translate() runs entirely in C, so
 # "delete every allowed character, then check for an empty remainder" is the
@@ -382,11 +393,11 @@ def fmt_time(ts, ts_sec):
     if ts_sec <= 0:
         return '?'
     sec = ts * ts_sec
+    # u == 's' always matches the bound below, so the loop always returns.
     for u in ('fs', 'ps', 'ns', 'us', 'ms', 's'):
         scaled = sec / _UNITS[u]
         if -1000.0 < scaled < 1000.0 or u == 's':
             return f'{scaled:g}{u}'
-    return f'{sec:g}s'
 
 
 # -- Value formatting --------------------------------------------------------
@@ -1183,13 +1194,15 @@ class VCDParser:
             body = tok[1:]
             # Consume the identifier_code before validating (see the b-token
             # note above): 'rnan x!' must not leak 'x!' back to be mis-read as a
-            # scalar change. NaN/Inf are legal %g output that _REAL_RE rejects.
+            # scalar change. Non-finite %g output (inf/nan) is a legal
+            # real_number and is kept; see _REAL_NONFINITE_RE.
             sym = next_token()
             if self._is_structural_token(sym):
                 if sym is not None:
                     pushback.append(sym)
                 return None
-            if len(body) > _REAL_MAX_LEN or not _REAL_RE.match(body):
+            if len(body) > _REAL_MAX_LEN or not (
+                    _REAL_RE.match(body) or _REAL_NONFINITE_RE.match(body)):
                 return None
             return sym, body
 
@@ -1742,7 +1755,7 @@ def _json(obj):
     print(json.dumps(obj, ensure_ascii=False, separators=(',', ':')))
 
 
-def _limit(args, cmd):
+def _limit(args):
     """Resolve global output limit. --verbose disables truncation unless an
     explicit --limit was supplied. --limit 0 always means unlimited."""
     val = getattr(args, 'limit', None)
@@ -2469,9 +2482,19 @@ def _summary_rows(vcd, t0, t1, sids):
     For 1-bit signals, rise/fall counts are reported for clean 0->1 and 1->0
     transitions only. x/z-related transitions still count as changes, but not
     as rises/falls.
+
+    The distinct-value count (`unique`) is exact up to
+    VCD_ANALYZER_MAX_UNIQUE_VALUES (default 65536, read per call like
+    VCD_ANALYZER_TOKEN_CHUNK_SIZE); beyond the cap it is a lower bound, and
+    the row says so: JSON `unique_is_exact: false` (the key appears only when
+    capped), text `uniq=N+`. This bounds memory on e.g. a 32-bit counter over
+    tens of millions of changes instead of keeping every value string alive.
     """
     selected = _selected_sids(vcd, sids)
     init_boundary = 0 if t0 == 0 else t0 - 1
+    # Per-call env read so tests can shrink the cap via monkeypatch.setenv
+    # without reloading the module.
+    unique_cap = _env_int('VCD_ANALYZER_MAX_UNIQUE_VALUES', 65536)
 
     # Baseline: {sid: val} — cheap str overwrites, same as state_at.
     # Stats dicts are created only once per signal, not on every baseline event.
@@ -2484,6 +2507,7 @@ def _summary_rows(vcd, t0, t1, sids):
             'changes': 0, 'first_at': None, 'last_at': None,
             'initial': init_val, 'last': init_val,
             'unique': {init_val} if init_val is not None else set(),
+            'unique_capped': False,
             'rise_count': 0 if is_scalar else None,
             'fall_count': 0 if is_scalar else None,
             'scalar': is_scalar,
@@ -2520,7 +2544,12 @@ def _summary_rows(vcd, t0, t1, sids):
                 s['first_at'] = t
             s['last_at'] = t
             s['last'] = val
-            s['unique'].add(val)
+            if val not in s['unique']:
+                if len(s['unique']) < unique_cap:
+                    s['unique'].add(val)
+                else:
+                    # At cap: the count stays a lower bound, flagged on the row.
+                    s['unique_capped'] = True
 
     # Signals that were in baseline but had no in-window events (static).
     for sid, val in baseline.items():
@@ -2550,6 +2579,8 @@ def _summary_rows(vcd, t0, t1, sids):
             row['last_at_h'] = row['last_at']
         if s['unique']:
             row['unique'] = len(s['unique'])
+            if s['unique_capped']:
+                row['unique_is_exact'] = False
         row['_width'] = info['width']
         row['_type'] = info.get('type', 'wire')
         rows.append(row)
@@ -2573,7 +2604,7 @@ def _public_row(row, verbose=False):
 
 
 def cmd_info(vcd, args):
-    _limit(args, 'info')
+    _limit(args)
     t_min, t_max = vcd.scan_time_range()
     ts = vcd.ts_sec
     synth = [s for s in vcd.signals.values() if s.get('synthesized')]
@@ -2642,7 +2673,7 @@ def cmd_info(vcd, args):
 
 
 def cmd_list(vcd, args):
-    limit = _limit(args, 'list')
+    limit = _limit(args)
     sids = vcd.match(args.filter)
     entries = []
     for sid, info in vcd.signals.items():
@@ -2683,7 +2714,7 @@ def cmd_dump(vcd, args):
     if t1 is not None and t1 < t0:
         raise _TimeParseError('end time must be >= begin time')
     sids = vcd.match(args.filter)
-    limit = _limit(args, 'dump')
+    limit = _limit(args)
     verbose = getattr(args, 'verbose', False)
     # Many value_changes share one timestamp, so memoize the formatted time
     # across consecutive events. fmt_time() depends only on (t, ts), so this
@@ -2730,8 +2761,9 @@ def cmd_dump(vcd, args):
     shown = 0
     total = 0
     truncated = False
+    # One memoized sentinel drives both the T= header and the formatted time:
+    # last_t and cur always changed on the same events.
     cur = object()
-    last_t = object()
     last_th = None
     for t, sid, val in vcd.iter_events(t0, t1, sids):
         total += 1
@@ -2739,11 +2771,9 @@ def cmd_dump(vcd, args):
             truncated = True
             break
         info = vcd.signals[sid]
-        if t != last_t:
-            last_t = t
-            last_th = fmt_time(t, ts)
         if t != cur:
             cur = t
+            last_th = fmt_time(t, ts)
             buf_append('T={}\n'.format(last_th))
         if verbose:
             buf_append('  {:<55} w={} {} = {}\n'.format(
@@ -2783,7 +2813,7 @@ def cmd_summary(vcd, args):
                             'fall_count': 0 if info['width'] == 1 else None,
                             'init': '(undef)', 'last': '(undef)',
                             '_width': info['width'], '_type': info.get('type', 'wire')})
-    limit = _limit(args, 'summary')
+    limit = _limit(args)
     shown, trunc = _clip(ordered, limit)
     begin_h = fmt_time(t0, ts)
     end_h = fmt_time(t1, ts) if t1 is not None else None
@@ -2808,9 +2838,12 @@ def cmd_summary(vcd, args):
             if getattr(args, 'verbose', False):
                 edge = '' if r.get('rise_count') is None else ' r={} f={}'.format(
                     r.get('rise_count', 0), r.get('fall_count', 0))
+                uniq = str(r.get('unique', 0))
+                if not r.get('unique_is_exact', True):
+                    uniq += '+'
                 print('  {:<45} w={} {} chg={}{} init={} last={} first@{} last@{} uniq={}'.format(
                     r['path'], r['_width'], r['_type'], r['changes'], edge, r['init'], r['last'],
-                    r.get('first_at', '-'), r.get('last_at', '-'), r.get('unique', 0)))
+                    r.get('first_at', '-'), r.get('last_at', '-'), uniq))
             else:
                 edge = '' if r.get('rise_count') is None else ' r={} f={}'.format(
                     r.get('rise_count', 0), r.get('fall_count', 0))
@@ -2849,7 +2882,7 @@ def cmd_snapshot(vcd, args):
             info = vcd.signals[sid]
             rows.append({'path': info['path'], 'value': None, 'undefined': True,
                          'width': info['width'], 'type': info.get('type', 'wire')})
-    limit = _limit(args, 'snapshot')
+    limit = _limit(args)
     shown, trunc = _clip(rows, limit)
     if args.json:
         _json({'at': fmt_time(t_at, ts), 'at_ticks': t_at, 'at_h': fmt_time(t_at, ts),
@@ -2898,7 +2931,7 @@ def cmd_compare(vcd, args):
                 d['width'] = info['width']
                 d['type'] = info.get('type', 'wire')
             diffs.append(d)
-    limit = _limit(args, 'compare')
+    limit = _limit(args)
     shown, trunc = _clip(diffs, limit)
     if args.json:
         _json({'t1': fmt_time(ta, ts), 't1_ticks': ta, 't1_h': fmt_time(ta, ts),
@@ -2958,7 +2991,7 @@ def cmd_search(vcd, args):
     selected = set(c['sid'] for cl in clauses for c in cl)
     selected.update(show_sids)
 
-    limit = _limit(args, 'search')
+    limit = _limit(args)
     verbose = getattr(args, 'verbose', False)
     cond_label = _join_clauses(clauses, _condition_label)
     cond_text = _join_clauses(clauses, _condition_result_text)
@@ -3333,8 +3366,20 @@ if __name__ == '__main__':
     import signal as _sig
     if hasattr(_sig, 'SIGPIPE'):
         _sig.signal(_sig.SIGPIPE, _sig.SIG_DFL)
+    # Verbatim VCD text and ensure_ascii=False JSON can carry non-ASCII
+    # characters (signal paths, $version/$date strings). Force UTF-8 so a
+    # legacy Windows codepage cannot turn a valid dump into a
+    # UnicodeEncodeError. No-op where reconfigure() is unavailable.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError, OSError):
+            pass
     try:
         main()
+    except KeyboardInterrupt:
+        # Conventional 128 + SIGINT(2): a clean exit, no traceback.
+        sys.exit(130)
     except BrokenPipeError:
         try:
             os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())

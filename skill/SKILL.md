@@ -283,7 +283,7 @@ Every time value appears in three forms:
 - 1-bit: `0`, `1`, `x`, `z`
 - Multi-bit clean: `decimal (0xhex)` — e.g., `255 (0xff)`
 - Multi-bit with unknowns: `b01xz` prefix notation
-- Real/realtime: float string as-is from simulator
+- Real/realtime: float string as-is from simulator, including non-finite `inf`/`nan`
 - Event type: `triggered`
 
 ### Filter vs condition signal matching

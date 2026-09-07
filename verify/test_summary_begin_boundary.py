@@ -1,5 +1,5 @@
 import vcd_analyzer as va
-from conftest import write_vcd, minimal_vcd
+from conftest import ns, write_vcd, minimal_vcd
 
 
 def _row_by_path(rows, path):
@@ -125,3 +125,34 @@ def test_summary_begin_zero_init_only_signal_is_static(tmp_path):
     assert counts["active"] == 1
     assert counts["static"] == 1
 
+
+_CNT_DECL = "$var wire 8 ! cnt $end\n"
+_CNT_DATA = "#0\nb0 !\n#10\nb1 !\n#20\nb10 !\n#30\nb11 !\n"
+
+
+def test_summary_unique_count_is_exact_below_cap(tmp_path):
+    p = write_vcd(tmp_path, minimal_vcd(_CNT_DECL, _CNT_DATA))
+    v = va.VCDParser(str(p))
+    rows, _undef, _counts = va._summary_rows(v, 0, None, None)
+    row = _row_by_path(rows, "tb.cnt")
+    assert row["unique"] == 4
+    # Below the cap the marker key is absent: no existing key changed shape.
+    assert "unique_is_exact" not in row
+
+
+def test_summary_unique_count_caps_and_marks_lower_bound(tmp_path, monkeypatch):
+    monkeypatch.setenv("VCD_ANALYZER_MAX_UNIQUE_VALUES", "2")
+    p = write_vcd(tmp_path, minimal_vcd(_CNT_DECL, _CNT_DATA))
+    v = va.VCDParser(str(p))
+    rows, _undef, _counts = va._summary_rows(v, 0, None, None)
+    row = _row_by_path(rows, "tb.cnt")
+    assert row["unique"] == 2
+    assert row["unique_is_exact"] is False
+
+
+def test_summary_text_marks_capped_unique_as_lower_bound(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VCD_ANALYZER_MAX_UNIQUE_VALUES", "2")
+    p = write_vcd(tmp_path, minimal_vcd(_CNT_DECL, _CNT_DATA))
+    v = va.VCDParser(str(p))
+    va.cmd_summary(v, ns(begin="0ns", end=None, verbose=True))
+    assert "uniq=2+" in capsys.readouterr().out

@@ -3,6 +3,43 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) page.
 
+## [1.5.1](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.1) - 2026-09-08
+
+### Fixed
+
+- **Non-finite real values are no longer silently dropped.** C99 `%g` renders
+  non-finite doubles as `inf`/`-inf`/`nan` — C99 7.19.6.1 additionally
+  allows implementation-defined characters after `nan` (the MSVC CRT emits
+  e.g. `nan(snan)`/`nan(ind)`) — and IEEE 1364's real_number is `%g`
+  output. The parser's real regex rejected all of it, so the whole
+  value_change record vanished from `dump`, `info`'s time range, and
+  `summary` counts with no diagnostic. They are now kept in the stream
+  verbatim, including the bounded `nan(payload)` form (locked by
+  `verify/test_real_nonfinite.py`). Condition targets still reject
+  non-finite values: nan never compares equal and inf has no finite equal,
+  so `=` can never match them — while `!=` with a finite target does match
+  non-finite values (nan/inf compare unequal to it), like any other
+  non-matching real.
+- **`summary`'s distinct-value (`unique`) set grew without bound** — a 32-bit
+  counter over tens of millions of changes kept every value string alive.
+  The set now caps at `VCD_ANALYZER_MAX_UNIQUE_VALUES` (default 65536, read
+  per call like `VCD_ANALYZER_TOKEN_CHUNK_SIZE`); beyond the cap the count is
+  a lower bound and the row says so: JSON `unique_is_exact: false` (key
+  appears only when capped), text `uniq=N+`. No existing key changed name,
+  type, or meaning.
+
+### Internal
+
+- Removed dead code: `fmt_time`'s unreachable trailing return, `_limit`'s
+  unused `cmd` parameter, and `cmd_dump`'s duplicate `last_t`/`cur` sentinels
+  (one memoized sentinel now drives both the `T=` header and the formatted
+  time). Once a signal's unique set hits the cap, the per-value membership
+  hash is skipped entirely (the set is frozen), so the cap also removes the
+  distinct-counting cost from the hot path.
+- CLI: Ctrl-C exits 130 instead of printing a traceback; stdout/stderr are
+  forced to UTF-8 (`errors='replace'`) so a legacy Windows codepage cannot
+  turn a valid dump into `UnicodeEncodeError`.
+
 ## [1.5.0](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.0) - 2026-08-24
 
 `search`'s condition system, rebuilt around the shape the downstream [RWaveAnalyzer](https://github.com/neveltyc/RWaveAnalyzer) port converged on: the edge trigger moves out of a flag and into the condition grammar, and OR becomes a repeatable flag. Along the way three silent-wrong-answer bugs found while comparing the two implementations are fixed — a real signal's value read as a bit string, a mis-typed in-string boolean accepted as an opaque literal, and a repeated `--condition` quietly discarding all but the last. Every non-`search` command is byte-identical to 1.4.0 at equal `--limit` (verified with `verify/bench.py --baseline`); the full suite passes, now 162 tests including three new files.

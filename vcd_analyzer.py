@@ -166,16 +166,21 @@ _REAL_RE = re.compile(
 )
 _REAL_MAX_LEN = 64  # Defensive cap: %.16g + sign + exponent fits well under this
 
-# C99 printf("%g") also renders non-finite doubles as 'inf' / '-inf' / 'nan'
-# (float() additionally accepts 'infinity'), and IEEE 1364's real_number is
-# %g output — so these are legal value_change texts the numeric pattern above
-# cannot match. This companion pattern keeps such records in the stream
-# instead of silently dropping a legal dump record (the pre-fix behavior lost
-# the event from dump, info's time range, and summary counts with no
-# diagnostic). Equality targets still reject them in _parse_target_value:
-# nan never compares equal and inf has no finite target, so no condition can
-# match one — a stated limitation, not data loss.
-_REAL_NONFINITE_RE = re.compile(r'^[+-]?(?:inf(?:inity)?|nan)$', re.IGNORECASE)
+# C99 7.19.6.1: %g renders ±inf as 'inf' and NaN as 'nan' 'optionally
+# followed by an implementation-defined sequence of characters' — e.g. the
+# MSVC CRT emits 'nan(snan)' / 'nan(ind)' — and IEEE 1364's real_number is
+# %g output. So these (including the bounded nan(payload) form) are legal
+# value_change texts the numeric pattern above cannot match. This companion
+# pattern keeps such records in the stream instead of silently dropping a
+# legal dump record (the pre-fix behavior lost the event from dump, info's
+# time range, and summary counts with no diagnostic). Condition matching:
+# _parse_target_value still rejects non-finite targets (nan never compares
+# equal and inf has no finite equal), so '=' can never match them; but '!='
+# with a finite target DOES match non-finite values (nan/inf compare unequal
+# to it) — the same rule as any other non-matching real value.
+_REAL_NONFINITE_RE = re.compile(
+    r'^[+-]?(?:inf(?:inity)?|nan(?:\([^()\s]+\))?)$', re.IGNORECASE
+)
 
 # Fast 4-state validation tables. str.translate() runs entirely in C, so
 # "delete every allowed character, then check for an empty remainder" is the
@@ -1194,8 +1199,9 @@ class VCDParser:
             body = tok[1:]
             # Consume the identifier_code before validating (see the b-token
             # note above): 'rnan x!' must not leak 'x!' back to be mis-read as a
-            # scalar change. Non-finite %g output (inf/nan) is a legal
-            # real_number and is kept; see _REAL_NONFINITE_RE.
+            # scalar change. Non-finite %g output (inf/nan, including nan
+            # payloads like 'nan(ind)') is a legal real_number and is kept;
+            # see _REAL_NONFINITE_RE.
             sym = next_token()
             if self._is_structural_token(sym):
                 if sym is not None:
@@ -2544,7 +2550,10 @@ def _summary_rows(vcd, t0, t1, sids):
                 s['first_at'] = t
             s['last_at'] = t
             s['last'] = val
-            if val not in s['unique']:
+            # Once capped the set is frozen, so skip the per-value hash
+            # entirely — this is the exact tens-of-millions hot path the cap
+            # exists for.
+            if not s['unique_capped'] and val not in s['unique']:
                 if len(s['unique']) < unique_cap:
                     s['unique'].add(val)
                 else:

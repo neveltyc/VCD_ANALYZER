@@ -8,13 +8,18 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/rel
 ### Fixed
 
 - **Non-finite real values are no longer silently dropped.** C99 `%g` renders
-  non-finite doubles as `inf`/`-inf`/`nan`, and IEEE 1364's real_number is
-  `%g` output — but the parser's real regex rejected them, so the whole
+  non-finite doubles as `inf`/`-inf`/`nan` — C99 7.19.6.1 additionally
+  allows implementation-defined characters after `nan` (the MSVC CRT emits
+  e.g. `nan(snan)`/`nan(ind)`) — and IEEE 1364's real_number is `%g`
+  output. The parser's real regex rejected all of it, so the whole
   value_change record vanished from `dump`, `info`'s time range, and
   `summary` counts with no diagnostic. They are now kept in the stream
-  verbatim (locked by `verify/test_real_nonfinite.py`). Equality targets
-  still reject `inf`/`nan`: nan never compares equal and inf has no finite
-  target, so no condition can match one — a stated limitation, not data loss.
+  verbatim, including the bounded `nan(payload)` form (locked by
+  `verify/test_real_nonfinite.py`). Condition targets still reject
+  non-finite values: nan never compares equal and inf has no finite equal,
+  so `=` can never match them — while `!=` with a finite target does match
+  non-finite values (nan/inf compare unequal to it), like any other
+  non-matching real.
 - **`summary`'s distinct-value (`unique`) set grew without bound** — a 32-bit
   counter over tens of millions of changes kept every value string alive.
   The set now caps at `VCD_ANALYZER_MAX_UNIQUE_VALUES` (default 65536, read
@@ -28,7 +33,9 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/rel
 - Removed dead code: `fmt_time`'s unreachable trailing return, `_limit`'s
   unused `cmd` parameter, and `cmd_dump`'s duplicate `last_t`/`cur` sentinels
   (one memoized sentinel now drives both the `T=` header and the formatted
-  time).
+  time). Once a signal's unique set hits the cap, the per-value membership
+  hash is skipped entirely (the set is frozen), so the cap also removes the
+  distinct-counting cost from the hot path.
 - CLI: Ctrl-C exits 130 instead of printing a traceback; stdout/stderr are
   forced to UTF-8 (`errors='replace'`) so a legacy Windows codepage cannot
   turn a valid dump into `UnicodeEncodeError`.

@@ -168,7 +168,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 | 版本 | 亮点 |
 |:------|:-----|
-| `1.5.1` | 解析器保留非有限实数值(`inf`/`-inf`/`nan`,此前整条记录被静默丢弃);`summary` 的单信号 unique 集合加上限(`VCD_ANALYZER_MAX_UNIQUE_VALUES`,默认 65536,超限时以 `unique_is_exact: false` 标注下界);Ctrl-C 以 130 干净退出而非打印堆栈;stdout/stderr 强制 UTF-8 |
+| `1.5.1` | 解析器保留非有限实数值(`inf`/`-inf`/`nan`,含 C99 `nan(payload)` 形式如 `nan(ind)`,此前整条记录被静默丢弃);`summary` 的单信号 unique 集合加上限(`VCD_ANALYZER_MAX_UNIQUE_VALUES`,默认 65536,超限时以 `unique_is_exact: false` 标注下界);Ctrl-C 以 130 干净退出而非打印堆栈;stdout/stderr 强制 UTF-8 |
 | `1.5.0` | `changed(SIG)` 边沿谓词取代 `--changed` 标志;`--condition` 可重复以 OR 子句;条件匹配依据信号声明类型(修复 real 信号的假阳/假阴);无法成立的条件目标改为报错而非静默无匹配;`--limit` 默认值改为 500,截断提示更清晰 |
 | `1.4.0` | 内部重构:将事件流与派生状态分层为解析器的三个不同视图(`iter_events` 原始 / `iter_transitions` / `state_at` 快照);所有命令输出不变,值变化热路径略快 |
 | `1.3.20` | 保留同一时间戳内的多次值变化;`info` 时间范围改用单一前向扫描器(与解析器等价,约快 1.5×,能扛超大/`$dumpall` 尾部);`search --changed` 逐次计数;`info` 的 `--limit` 校验与空数据输出 |

@@ -68,17 +68,32 @@ def test_dumpall_checkpoint_after_begin_is_not_a_change(tmp_path):
 
 def test_begin_agrees_with_full_scan(tmp_path):
     p = write_vcd(tmp_path, DUMPALL_VCD)
+    ts = va.VCDParser(str(p)).ts_sec
     full = _dump_events(p)
     assert len(full) == 5  # the two checkpoint records never appear at all
     for begin in ('0ns', '1ns', '20ns', '25ns', '30ns', '35ns', '40ns'):
-        t0 = va.parse_time(begin, va.VCDParser(str(p)).ts_sec)
+        t0 = va.parse_time(begin, ts)
         assert _dump_events(p, begin) == [e for e in full if e[0] >= t0], begin
 
 
 def test_bit_bus_checkpoint_after_begin_is_not_a_change(tmp_path):
     p = write_vcd(tmp_path, BUS_VCD)
-    assert _dump_events(p, '25ns') == [(40, 'tb.ex[1:0]', '3 (0x3)')]
-    assert _dump_events(p, '25ns') == [e for e in _dump_events(p) if e[0] >= 25]
+    begin25 = _dump_events(p, '25ns')
+    assert begin25 == [(40, 'tb.ex[1:0]', '3 (0x3)')]
+    assert begin25 == [e for e in _dump_events(p) if e[0] >= 25]
+
+
+def test_overwide_clamp_is_mirrored_across_the_boundary(tmp_path):
+    # The catch-up baseline has to be clamped exactly as the emit path clamps it.
+    # Skip that and a re-asserted over-wide value compares unequal to its own
+    # stored form and leaks through the window edge as a change.
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 4 ! bus $end\n',
+        '#0\nb11111 !\n#10\n$dumpall\nb11111 !\n$end\n#20\nb0000 !\n',
+    ))
+    full = _dump_events(p)
+    assert full == [(0, 'tb.bus', 'bxxxx'), (20, 'tb.bus', '0 (0x0)')]
+    assert _dump_events(p, '5ns') == [e for e in full if e[0] >= 5]
 
 
 def test_noop_is_not_invented_in_text_mode_either(tmp_path):

@@ -10,8 +10,10 @@
   <img alt="Version" src="https://img.shields.io/badge/version-1.5.2-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-180%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-181%20passed-22aa55?style=flat-square">
 </p>
+
+[中文说明](README_zh.md)
 
 ---
 
@@ -66,8 +68,8 @@ Single file, no dependencies, Python 3.9+.
 # Latest
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
-# Pinned release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.5.2/vcd_analyzer.py -o vcd_analyzer.py
+# Pinned published release tag (recommended — avoids compatibility surprises from main)
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.5.1/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
 python vcd_analyzer.py --version
@@ -145,7 +147,7 @@ ritual &mdash; drop it anywhere with Python 3.9+ and it works.
 
 ```
 vcd_analyzer.py       The tool (single file, stdlib only)
-verify/               pytest + unittest suite — 180 tests, 0 failures
+verify/               pytest + unittest suite — 181 tests, 0 failures
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
 CHANGELOG.md          Compact changelog with links to detailed release notes

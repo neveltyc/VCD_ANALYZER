@@ -83,6 +83,20 @@ def test_bit_bus_checkpoint_after_begin_is_not_a_change(tmp_path):
     assert begin25 == [e for e in _dump_events(p) if e[0] >= 25]
 
 
+def test_bit_bus_first_observation_after_begin_is_not_suppressed(tmp_path):
+    # No bit has appeared before the window. The all-x template represents
+    # unknown state, not a prior observation of the synthesized bus.
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! ex [0] $end\n'
+        '$var wire 1 " ex [1] $end\n',
+        '#0\n#10\nx!\n#20\n1"\n',
+    ))
+    full = _dump_events(p)
+    assert full == [(10, 'tb.ex[1:0]', 'bxx'),
+                    (20, 'tb.ex[1:0]', 'b1x')]
+    assert _dump_events(p, '5ns') == full
+
+
 def test_overwide_clamp_is_mirrored_across_the_boundary(tmp_path):
     # The catch-up baseline has to be clamped exactly as the emit path clamps it.
     # Skip that and a re-asserted over-wide value compares unequal to its own

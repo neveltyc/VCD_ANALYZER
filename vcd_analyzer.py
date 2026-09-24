@@ -1465,6 +1465,10 @@ class VCDParser:
                     for gid, _idx in kept:
                         needed_gids.add(gid)
             bit_state = {gid: self._bit_state_template[gid][:] for gid in needed_gids}
+        # A synthesized bus has no previous observation until at least one of
+        # its bit identifiers occurs. The template's all-x value is not an
+        # observation and must not suppress a first all-x record in the window.
+        observed_bit_buses = set()
 
         def _next():
             nonlocal toks, ntoks, ti
@@ -1529,8 +1533,8 @@ class VCDParser:
                         # once per bus here, not per catch-up record — doing it
                         # in the catch-up loop would make the head scan O(width)
                         # per bit change.
-                        for gid, bits in bit_state.items():
-                            last_val[gid] = ''.join(reversed(bits))
+                        for gid in observed_bit_buses:
+                            last_val[gid] = ''.join(reversed(bit_state[gid]))
                     cur_t = new_t
                     if t1 is not None and cur_t > t1:
                         return
@@ -1579,6 +1583,7 @@ class VCDParser:
                         bit_val = val if len(val) == 1 and _is_4state_bits(val) else 'x'
                         for gid, idx in bit_map[sym]:
                             bit_state[gid][idx] = bit_val
+                            observed_bit_buses.add(gid)
                     if sids is None or sym in sids:
                         info = signals.get(sym)
                         if info is not None:

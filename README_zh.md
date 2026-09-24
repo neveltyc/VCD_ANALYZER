@@ -13,8 +13,6 @@
   <img alt="Tests" src="https://img.shields.io/badge/测试-181%20passed-22aa55?style=flat-square">
 </p>
 
-[English](README.md)
-
 ---
 
 ## 为什么需要这个工具？

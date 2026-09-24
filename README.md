@@ -13,8 +13,6 @@
   <img alt="Tests" src="https://img.shields.io/badge/tests-181%20passed-22aa55?style=flat-square">
 </p>
 
-[中文说明](README_zh.md)
-
 ---
 
 ## Why VCD Analyzer?

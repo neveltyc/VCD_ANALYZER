@@ -10,7 +10,7 @@
   <img alt="Version" src="https://img.shields.io/badge/版本-1.5.2-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/测试-179%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/测试-180%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -134,7 +134,7 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 ```
 vcd_analyzer.py       核心工具（单文件，仅依赖标准库）
-verify/               pytest + unittest 测试套件 —— 179 个用例，0 失败
+verify/               pytest + unittest 测试套件 —— 180 个用例，0 失败
 verify/fixtures/      脱敏 VCD 测试波形（不含任何私有路径）
 verify/samples/       真实 GitHub VCD 样本，用于冒烟测试
 CHANGELOG.md          简洁变更日志，含详细发行说明链接

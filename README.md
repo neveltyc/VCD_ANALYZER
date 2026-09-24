@@ -10,7 +10,7 @@
   <img alt="Version" src="https://img.shields.io/badge/version-1.5.1-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-171%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-179%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -138,14 +138,14 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 ## Single file, zero dependencies
 
-`vcd_analyzer.py` is ~2,400 lines of pure Python. No pip install, no virtualenv
+`vcd_analyzer.py` is pure Python with no third-party imports. No pip install, no virtualenv
 ritual &mdash; drop it anywhere with Python 3.9+ and it works.
 
 ## Project layout
 
 ```
 vcd_analyzer.py       The tool (single file, stdlib only)
-verify/               pytest + unittest suite — 171 tests, 0 failures
+verify/               pytest + unittest suite — 179 tests, 0 failures
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
 CHANGELOG.md          Compact changelog with links to detailed release notes

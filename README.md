@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.5.1-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.5.2-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
   <img alt="Tests" src="https://img.shields.io/badge/tests-179%20passed-22aa55?style=flat-square">
@@ -67,7 +67,7 @@ Single file, no dependencies, Python 3.9+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.5.1/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.5.2/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
 python vcd_analyzer.py --version
@@ -180,6 +180,7 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 
 | Version | Highlight |
 |:--------|:----------|
+| `1.5.2` | `dump --begin` no longer invents value changes: the mid-file catch-up scan carries the no-op baseline across the window edge, so a `$dumpall`/`$dumpon` checkpoint re-asserting current values — iverilog emits one by default — stays a no-op exactly as in a full scan |
 | `1.5.1` | Parser keeps non-finite real values (`inf`/`-inf`/`nan`, including C99 `nan(payload)` forms like `nan(ind)` — previously the whole record was silently dropped); `summary` caps its per-signal unique-value set (`VCD_ANALYZER_MAX_UNIQUE_VALUES`, default 65536, lower bound flagged as `unique_is_exact: false`); Ctrl-C exits 130 instead of a traceback; stdout/stderr forced to UTF-8 |
 | `1.5.0` | `changed(SIG)` edge predicate replaces the `--changed` flag; repeatable `--condition` ORs clauses; condition matching follows the signal's declared type (fixes real-signal false positives/negatives); unusable condition targets are rejected instead of silently unmatched; `--limit` default 500 with a clearer truncation notice |
 | `1.4.0` | Internal refactor: separate the event stream from derived state into three distinct parser views (`iter_events` raw / `iter_transitions` / `state_at` snapshots); no change to any command's output, value-change hot path slightly faster |

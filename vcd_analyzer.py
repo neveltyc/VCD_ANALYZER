@@ -87,7 +87,7 @@ Notes:
   since coincidence is a property of the tick rather than of any one record.
 """
 
-__version__ = '1.5.1'
+__version__ = '1.5.2'
 
 import sys
 import os

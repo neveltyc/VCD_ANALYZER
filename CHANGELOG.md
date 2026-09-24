@@ -41,8 +41,7 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/rel
   drifting on every change, so it is removed rather than corrected; that
   section's actual point is single-file and zero-dependency. `_summary_rows`'
   docstring now names the `(rows, undefined, counts)` it returns. Test counts
-  and version markers bumped for this release. The pinned-install examples
-  continue to use the latest published tag until v1.5.2 is tagged.
+  and version markers bumped for this release.
 
 ## [1.5.1](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.1) - 2026-09-08
 

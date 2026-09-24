@@ -67,7 +67,7 @@ python vcd_analyzer.py summary sim.vcd --filter dll_*
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.5.1/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.5.2/vcd_analyzer.py -o vcd_analyzer.py
 
 # 验证
 python vcd_analyzer.py --version

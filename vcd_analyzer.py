@@ -87,7 +87,7 @@ Notes:
   since coincidence is a property of the tick rather than of any one record.
 """
 
-__version__ = '1.5.1'
+__version__ = '1.5.2'
 
 import sys
 import os
@@ -1437,6 +1437,7 @@ class VCDParser:
         # look-ahead and $-section skipping keep their exact prior semantics.
         list_iter = self._data_token_lists()
         pushback = []
+        signals = self.signals
         toks = ()
         ntoks = 0
         ti = 0
@@ -1464,6 +1465,10 @@ class VCDParser:
                     for gid, _idx in kept:
                         needed_gids.add(gid)
             bit_state = {gid: self._bit_state_template[gid][:] for gid in needed_gids}
+        # A synthesized bus has no previous observation until at least one of
+        # its bit identifiers occurs. The template's all-x value is not an
+        # observation and must not suppress a first all-x record in the window.
+        observed_bit_buses = set()
 
         def _next():
             nonlocal toks, ntoks, ti
@@ -1522,6 +1527,14 @@ class VCDParser:
                     if cur_t >= t0:
                         for sid, prev, val in _flush():
                             yield cur_t, sid, prev, val
+                    elif new_t >= t0:
+                        # Crossing into the window: hand bit-exploded buses the
+                        # no-op baseline a full scan would have built. Joined
+                        # once per bus here, not per catch-up record — doing it
+                        # in the catch-up loop would make the head scan O(width)
+                        # per bit change.
+                        for gid in observed_bit_buses:
+                            last_val[gid] = ''.join(reversed(bit_state[gid]))
                     cur_t = new_t
                     if t1 is not None and cur_t > t1:
                         return
@@ -1559,15 +1572,24 @@ class VCDParser:
                     # Not a value_change opener (e.g. stray '#', bare 'b').
                     continue
 
-                # Catch-up before t0: update bit_state only, don't emit.
-                # Standalone state is owned by callers (e.g. state_at
-                # accumulates it from yielded events), so nothing to do here
-                # for the standalone case — the continue is correct.
+                # Catch-up before t0: don't emit, but DO advance last_val — the
+                # no-op baseline. Without it a record at or after t0 that merely
+                # re-asserts a pre-t0 value reads as a first observation, so
+                # `dump --begin` reported changes a full scan suppressed. That
+                # re-assertion is routine: iverilog's $dumpall checkpoint re-emits
+                # every signal in dump scope.
                 if cur_t < t0:
                     if sym in bit_map:
                         bit_val = val if len(val) == 1 and _is_4state_bits(val) else 'x'
                         for gid, idx in bit_map[sym]:
                             bit_state[gid][idx] = bit_val
+                            observed_bit_buses.add(gid)
+                    if sids is None or sym in sids:
+                        info = signals.get(sym)
+                        if info is not None:
+                            if len(val) > info['width']:
+                                val = _clamp_overwide_logic_value(val, info)
+                            last_val[sym] = val
                     continue
 
                 # Bit-exploded signal: aggregate into virtual bus value(s).
@@ -1590,7 +1612,7 @@ class VCDParser:
 
                 # Standalone signal (may run after the bit-bus branch above when
                 # the sym serves both roles).
-                info = self.signals.get(sym)
+                info = signals.get(sym)
                 if info is None:
                     continue
                 if sids is not None and sym not in sids:
@@ -2473,7 +2495,7 @@ def _transition_groups(vcd, t0, t1, sids):
 
 
 def _summary_rows(vcd, t0, t1, sids):
-    """Return (rows, counts) for window summary.
+    """Return (rows, undefined, counts) for window summary.
 
     Baseline captures state up to init_boundary: t=0 when the window starts
     at 0 (so $dumpvars initialization is part of the baseline, not counted

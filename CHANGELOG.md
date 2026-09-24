@@ -3,6 +3,46 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) page.
 
+## [1.5.2](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.2) - 2026-09-24
+
+### Fixed
+
+- **`dump --begin <T>` reported value changes that never happened.** The change
+  stream coalesces a record that merely re-asserts a signal's current value — a
+  consecutive duplicate, or a `$dumpall`/`$dumpon` checkpoint re-emitting the
+  current value — into a no-op that adds no change event. That contract held for
+  a full scan but not for one starting mid-file: the pre-`t0` catch-up loop in
+  `_iter_changes` advanced bit-exploded bus state while skipping `last_val`, the
+  no-op baseline, so the first such record at or after `--begin` read as a
+  *first observation* and was emitted as a change. This was reachable from stock
+  simulator output, not only from hand-written fixtures — iverilog emits a
+  `$dumpall` checkpoint re-emitting the current value of every signal in dump
+  scope, so `dump --begin` produced one phantom change per unchanged signal at
+  the first checkpoint after `T` (40 on a 40-signal trace, against 0 for the same
+  file scanned from the start). `summary`, `search`, `snapshot` and `compare`
+  were never affected; they already scan from `t=0`. The catch-up loop now
+  advances `last_val` for standalone signals, applying the same over-wide clamp
+  the emit path applies so the two agree on the baseline, and bit-exploded buses
+  are seeded once, on the timestamp that crosses into the window — joining per
+  catch-up record would make the head scan `O(width)` per bit change. New
+  `verify/test_dump_begin_noop.py` locks the contract with a full-scan
+  equivalence sweep (`dump --begin T` must equal a full `dump` filtered to
+  `>= T`) over nine window starts and every record shape, plus guards against
+  over-suppression: a genuine change landing exactly on the boundary, a signal
+  whose first observation is after the window, and event variables still
+  counting each trigger. Pure catch-up traversal costs ~31% more on a
+  6M-record trace, which is the price of correctness — `dump --begin` remains
+  cheaper than `summary` or a full `dump` over the same head scan.
+
+### Changed
+
+- **Documentation no longer quotes a source line count.** The "~2,400 lines"
+  claim in `README.md`/`README_zh.md` had drifted from the file and would keep
+  drifting on every change, so it is removed rather than corrected; that
+  section's actual point is single-file and zero-dependency. `_summary_rows`'
+  docstring now names the `(rows, undefined, counts)` it returns. Test counts
+  and version markers bumped for this release.
+
 ## [1.5.1](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.1) - 2026-09-08
 
 ### Fixed
@@ -266,4 +306,3 @@ Rewrite parser around token-based handling, remove handshake command
 ## [1.0.0](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.0.0) - 2026-05-24
 
 Initial public release — core CLI, parser, and 6 subcommands
-
